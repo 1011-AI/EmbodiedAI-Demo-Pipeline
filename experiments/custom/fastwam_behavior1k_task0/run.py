@@ -43,6 +43,25 @@ def _expected_text_embedding_path(
     return cache_dir / f"{prompt_hash}.t5_len{context_len}.{encoder_id}.pt"
 
 
+def _text_embedding_command(
+    *,
+    source_root: Path,
+    task_name: str,
+    fastwam_config: dict[str, Any],
+    overwrite: bool,
+) -> list[str]:
+    return [
+        sys.executable,
+        str(source_root / "scripts/precompute_text_embeds.py"),
+        f"task={task_name}",
+        f"model.model_id={fastwam_config['model_id']}",
+        f"model.tokenizer_model_id={fastwam_config['tokenizer_model_id']}",
+        "model.redirect_common_files="
+        + str(bool(fastwam_config.get("redirect_common_files", False))).lower(),
+        f"+overwrite={str(overwrite).lower()}",
+    ]
+
+
 def _run_dataset_smoke(
     *,
     project_root: Path,
@@ -205,13 +224,28 @@ def main(argv: list[str] | None = None) -> int:
         help="通过上游真实 LeRobot loader 读取一个样本并核对 tensor shape。",
     )
     parser.add_argument(
+        "--precompute-text-embeds",
+        action="store_true",
+        help="在当前节点用本地 UMT5 权重预计算精确 Task 0 文本缓存；建议在大内存管理节点执行。",
+    )
+    parser.add_argument(
         "--recompute-stats",
         action="store_true",
         help="重新扫描 Task 0 Parquet 并覆盖 23D normalization stats。",
     )
     args, forwarded = parser.parse_known_args(argv)
-    if args.prepare_only and args.dataset_smoke:
-        parser.error("--prepare-only and --dataset-smoke are mutually exclusive")
+    if sum(
+        int(value)
+        for value in (
+            args.prepare_only,
+            args.dataset_smoke,
+            args.precompute_text_embeds,
+        )
+    ) > 1:
+        parser.error(
+            "--prepare-only, --dataset-smoke and --precompute-text-embeds "
+            "are mutually exclusive"
+        )
 
     here = Path(__file__).resolve().parent
     project_root = find_project_root(here)
@@ -319,23 +353,84 @@ def main(argv: list[str] | None = None) -> int:
                 )
             ],
         )
-        text_config = (config.get("fastwam") or {}).get("text_embeddings") or {}
+        fastwam_config = config.get("fastwam") or {}
+        text_config = fastwam_config.get("text_embeddings") or {}
         if not isinstance(text_config, dict):
             raise SystemExit("ERROR: fastwam.text_embeddings must be a YAML mapping")
         expected_text_cache = _expected_text_embedding_path(
             text_cache,
             task_instruction=task_instruction,
-            model_id=str((config.get("fastwam") or {}).get("model_id", "")),
+            model_id=str(fastwam_config.get("model_id", "")),
             context_len=int(text_config.get("context_len", 128)),
         )
-        if expected_text_cache.is_file() and expected_text_cache.stat().st_size > 0:
+        text_cache_ready = (
+            expected_text_cache.is_file()
+            and expected_text_cache.stat().st_size > 0
+        )
+        if text_cache_ready:
             print(f"FASTWAM_BEHAVIOR1K_TEXT_CACHE_READY {expected_text_cache}")
         elif not args.prepare_only and not args.dataset_smoke and not args.dry_run:
-            raise SystemExit(
-                "ERROR: the exact Task 0 FastWAM text embedding cache is missing: "
-                f"{expected_text_cache}. Precompute it once on a high-memory "
-                "management node before launching GPU training."
+            if not args.precompute_text_embeds:
+                raise SystemExit(
+                    "ERROR: the exact Task 0 FastWAM text embedding cache is missing: "
+                    f"{expected_text_cache}. Run this once on a high-memory "
+                    "management node: "
+                    "python experiments/custom/fastwam_behavior1k_task0/run.py "
+                    "--precompute-text-embeds"
+                )
+
+        if args.precompute_text_embeds:
+            overwrite = bool(text_config.get("overwrite", False))
+            if text_cache_ready and not overwrite:
+                print(
+                    "FASTWAM_BEHAVIOR1K_TEXT_PRECOMPUTE_REUSED "
+                    f"{expected_text_cache}"
+                )
+                return 0
+            command = _text_embedding_command(
+                source_root=source_root,
+                task_name=FASTWAM_TASK_CONFIG_NAME,
+                fastwam_config=fastwam_config,
+                overwrite=overwrite,
             )
+            print("FASTWAM_BEHAVIOR1K_TEXT_PRECOMPUTE_COMMAND " + " ".join(command))
+            if args.dry_run:
+                return 0
+            precompute_environment = os.environ.copy()
+            precompute_environment.update(
+                {
+                    "PYTHONPATH": os.pathsep.join(
+                        [
+                            str(source_root / "src"),
+                            precompute_environment.get("PYTHONPATH", ""),
+                        ]
+                    ).rstrip(os.pathsep),
+                    "DIFFSYNTH_MODEL_BASE_PATH": str(
+                        _project_path(
+                            project_root,
+                            (config.get("paths") or {}).get("model_base", "models"),
+                        ).resolve()
+                    ),
+                    "DIFFSYNTH_SKIP_DOWNLOAD": "true",
+                }
+            )
+            status = subprocess.call(
+                command,
+                cwd=source_root,
+                env=precompute_environment,
+            )
+            if status != 0:
+                return status
+            if not expected_text_cache.is_file() or expected_text_cache.stat().st_size <= 0:
+                raise SystemExit(
+                    "ERROR: FastWAM text precompute exited successfully but did "
+                    f"not create {expected_text_cache}"
+                )
+            print(
+                "FASTWAM_BEHAVIOR1K_TEXT_PRECOMPUTE_OK "
+                f"{expected_text_cache}"
+            )
+            return 0
     elif not args.dry_run:
         raise SystemExit(
             f"ERROR: generated FastWAM workspace is missing: {source_root}. "

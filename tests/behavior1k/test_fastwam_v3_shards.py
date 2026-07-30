@@ -11,6 +11,7 @@ pq = pytest.importorskip("pyarrow.parquet")
 
 from experiments.custom.fastwam_behavior1k_task0.run import (
     _expected_text_embedding_path,
+    _text_embedding_command,
 )
 from pipelines.custom.fastwam.behavior1k.prepare import discover_task_selection
 from pipelines.custom.fastwam.behavior1k.v3_shards import (
@@ -40,6 +41,24 @@ def test_task0_text_embedding_cache_name_matches_fastwam_precompute() -> None:
         "3c6c057f0dd8a659b46826353422f560eb1a024e00c6cc9fc5f814ee10a84338."
         "t5_len128.wan22ti2v5b.pt"
     )
+
+
+def test_text_embedding_command_uses_generated_task_config() -> None:
+    command = _text_embedding_command(
+        source_root=Path("/fastwam"),
+        task_name="behavior1k_task0_action_only",
+        fastwam_config={
+            "model_id": "Wan-AI/Wan2.2-TI2V-5B",
+            "tokenizer_model_id": "Wan-AI/Wan2.1-T2V-1.3B",
+            "redirect_common_files": False,
+        },
+        overwrite=False,
+    )
+
+    assert command[1] == "/fastwam/scripts/precompute_text_embeds.py"
+    assert "task=behavior1k_task0_action_only" in command
+    assert "model.redirect_common_files=false" in command
+    assert "+overwrite=false" in command
 
 
 def _write_real_v3_structure(root: Path) -> list[dict[str, Any]]:
