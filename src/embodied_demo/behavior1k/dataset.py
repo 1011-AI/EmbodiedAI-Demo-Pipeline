@@ -118,6 +118,16 @@ def _get_path(row: Mapping[str, Any], path: str, default: Any = None) -> Any:
     return current
 
 
+def _get_first_path(row: Mapping[str, Any], *paths: str) -> Any:
+    """Return the first non-null value across schema-compatible field names."""
+
+    for path in paths:
+        value = _get_path(row, path)
+        if value is not None:
+            return value
+    return None
+
+
 def episode_reference_from_row(
     row: Mapping[str, Any],
     *,
@@ -130,6 +140,23 @@ def episode_reference_from_row(
     length = int(row["length"])
     data_chunk = int(_get_path(row, "data/chunk_index"))
     data_file = int(_get_path(row, "data/file_index"))
+    # The published 2026 revision stores these two offsets as top-level
+    # ``dataset_*`` columns, while older LeRobot metadata and local fixtures
+    # may nest them below ``data``. Accept both without changing their meaning.
+    data_from_index = _get_first_path(
+        row,
+        "dataset_from_index",
+        "data/dataset_from_index",
+    )
+    data_to_index = _get_first_path(
+        row,
+        "dataset_to_index",
+        "data/dataset_to_index",
+    )
+    if data_from_index is None or data_to_index is None:
+        raise SchemaValidationError(
+            f"episode {episode_index} is missing dataset frame offsets"
+        )
     data_ref = ShardReference(
         relative_path=data_path_template.format(
             chunk_index=data_chunk,
@@ -137,8 +164,8 @@ def episode_reference_from_row(
         ),
         chunk_index=data_chunk,
         file_index=data_file,
-        from_index=int(_get_path(row, "data/dataset_from_index")),
-        to_index=int(_get_path(row, "data/dataset_to_index")),
+        from_index=int(data_from_index),
+        to_index=int(data_to_index),
     )
 
     videos: dict[str, ShardReference] = {}

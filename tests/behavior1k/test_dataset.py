@@ -143,6 +143,47 @@ def test_episode_mapping_preserves_independent_camera_shards() -> None:
     assert len({item.relative_path for item in reference.videos.values()}) == 3
 
 
+def test_episode_mapping_accepts_published_top_level_dataset_offsets() -> None:
+    row = {
+        "episode_index": 0,
+        "task_index": 0,
+        "length": 30,
+        "tasks": ["Turn on the radio."],
+        "data/chunk_index": 0,
+        "data/file_index": 2,
+        "dataset_from_index": 10,
+        "dataset_to_index": 40,
+        **{
+            f"videos/{key}/chunk_index": 0
+            for key in RGB_VIDEO_KEYS
+        },
+        **{
+            f"videos/{key}/file_index": index
+            for index, key in enumerate(RGB_VIDEO_KEYS)
+        },
+        **{
+            f"videos/{key}/from_timestamp": 0.0
+            for key in RGB_VIDEO_KEYS
+        },
+        **{
+            f"videos/{key}/to_timestamp": 1.0
+            for key in RGB_VIDEO_KEYS
+        },
+    }
+
+    reference = episode_reference_from_row(
+        row,
+        data_path_template="data/chunk-{chunk_index:03d}/file-{file_index:03d}.parquet",
+        video_path_template=(
+            "videos/{video_key}/chunk-{chunk_index:03d}/file-{file_index:03d}.mp4"
+        ),
+        video_keys=RGB_VIDEO_KEYS,
+    )
+
+    assert reference.data.from_index == 10
+    assert reference.data.to_index == 40
+
+
 def test_virtual_view_writes_only_manifests_and_keeps_source_unchanged(
     tmp_path: Path,
 ) -> None:
