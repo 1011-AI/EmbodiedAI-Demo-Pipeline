@@ -75,3 +75,16 @@ def test_auto_process_count_prefers_platform_allocation(monkeypatch) -> None:
     monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0,1")
 
     assert runner._resolve_local_processes("auto") == 4
+
+
+def test_runtime_enables_direct_cuda_checkpoint_loading(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    runner = _load_runner()
+    config = runner.load_config(EXPERIMENT_DIR / "config.yaml")
+    monkeypatch.setenv("BEHAVIOR1K_PI05_DIRECT_CUDA_LOAD", "stale")
+
+    environment = runner.build_environment(config, tmp_path)
+
+    assert environment["BEHAVIOR1K_PI05_DIRECT_CUDA_LOAD"] == "1"

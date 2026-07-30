@@ -3,12 +3,9 @@
 from __future__ import annotations
 
 import argparse
-import contextlib
 import hashlib
-import io
 import json
 import math
-import sys
 import time
 from pathlib import Path
 from typing import Any
@@ -22,48 +19,11 @@ from .adapter import (
     adapt_lerobot_dataset,
     load_behavior_view,
 )
-
-_LOAD_SUCCESS_MARKERS = (
-    "Loaded state dict from model.safetensors",
-    "All keys loaded successfully!",
+from .loading import (
+    CheckpointLoadTee as _TeeStdout,
+    make_policy_with_memory_strategy,
+    validate_pi05_checkpoint_load as _validate_checkpoint_load_output,
 )
-_LOAD_FAILURE_MARKERS = (
-    "Returning model without loading pretrained weights",
-    "Warning: Could not load state dict",
-)
-
-
-class _TeeStdout(io.StringIO):
-    """Capture pinned LeRobot load evidence while keeping startup logs visible."""
-
-    def __init__(self, target: Any | None = None) -> None:
-        super().__init__()
-        # Save the original stream before redirect_stdout replaces sys.stdout
-        # with this object. Looking up sys.stdout in write() would recurse.
-        self._target = target if target is not None else sys.stdout
-
-    def write(self, value: str) -> int:
-        self._target.write(value)
-        return super().write(value)
-
-    def flush(self) -> None:
-        self._target.flush()
-        super().flush()
-
-
-def _validate_checkpoint_load_output(output: str) -> None:
-    """Reject LeRobot's random-weight fallback using pinned load markers."""
-
-    failed_markers = [marker for marker in _LOAD_FAILURE_MARKERS if marker in output]
-    missing_markers = [
-        marker for marker in _LOAD_SUCCESS_MARKERS if marker not in output
-    ]
-    if failed_markers or missing_markers:
-        raise BehaviorLeRobotAdapterError(
-            "LeRobot did not prove a complete PI0.5 checkpoint load; refusing "
-            "to continue with potentially random weights. "
-            f"failure_markers={failed_markers}, missing_success_markers={missing_markers}"
-        )
 
 
 def _resolve_pretrained_dir(path: Path) -> Path:
@@ -210,10 +170,11 @@ def _make_pi05_runtime(
     # Pinned LeRobot 0.6.1 currently catches checkpoint loading exceptions and
     # returns a randomly initialized model.  Treat that upstream fallback as a
     # hard error: an evaluator server must never silently serve random weights.
-    load_evidence = _TeeStdout(sys.stdout)
-    with contextlib.redirect_stdout(load_evidence):
-        policy = make_policy(cfg=policy_config, ds_meta=dataset_meta)
-    _validate_checkpoint_load_output(load_evidence.getvalue())
+    policy = make_policy_with_memory_strategy(
+        make_policy,
+        cfg=policy_config,
+        ds_meta=dataset_meta,
+    )
     policy.eval()
     policy.reset()
     preprocessor, postprocessor = make_pre_post_processors(

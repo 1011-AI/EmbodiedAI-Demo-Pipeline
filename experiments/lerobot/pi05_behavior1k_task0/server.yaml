@@ -45,6 +45,10 @@ runtime:
   hf_home: hf_cache
   offline: true
 
+  # 与训练入口一致，直接把 PI0.5 参数和 safetensors 落到 CUDA，避免
+  # LeRobot 0.6.1 的 CPU 双份峰值撞上容器 cgroup 内存限制。
+  direct_cuda_load: true
+
 observation:
   # 必须与 evaluator 使用的 robot YAML 完全一致。官方 v3.9.1 r1pro.yaml
   # 的 flatten_obs_dict 会生成：

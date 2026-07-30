@@ -212,6 +212,7 @@ def test_server_uses_project_local_offline_huggingface_cache(
         "runtime": {
             "hf_home": "project-cache",
             "offline": True,
+            "direct_cuda_load": True,
         }
     }
     environment: dict[str, str] = {}
@@ -227,4 +228,5 @@ def test_server_uses_project_local_offline_huggingface_cache(
     )
     assert selected["HF_HUB_OFFLINE"] == "1"
     assert selected["TRANSFORMERS_OFFLINE"] == "1"
+    assert selected["BEHAVIOR1K_PI05_DIRECT_CUDA_LOAD"] == "1"
     assert environment == selected

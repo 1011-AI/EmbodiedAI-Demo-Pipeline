@@ -312,6 +312,12 @@ python experiments/lerobot/pi05_behavior1k_task0/run.py \
 [`../experiments/lerobot/pi05_behavior1k_task0/config.yaml`](../experiments/lerobot/pi05_behavior1k_task0/config.yaml)，
 不需要手写整串训练参数。
 
+该配置默认开启 `runtime.direct_cuda_load`。这是项目侧的内存受限适配：LeRobot 0.6.1
+原始加载路径会先在 CPU 构造模型并把约 14 GB safetensors 完整读入 CPU，在 16 GB
+cgroup 容器中可能尚未占用 GPU 就被 OOM kill；开关开启后，模型与权重直接落到
+Accelerate 为当前 rank 选择的 CUDA device。它不改动固定的 LeRobot checkout，
+普通大内存环境可将该开关设为 `false` 回到上游默认行为。
+
 ### custom FastWAM
 
 - 复用 FastWAM/Wan 中形状兼容的 backbone；

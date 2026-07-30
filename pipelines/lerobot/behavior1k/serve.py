@@ -92,6 +92,11 @@ def configure_runtime_environment(
         "HUGGINGFACE_HUB_CACHE": str(hf_home / "hub"),
         "HF_DATASETS_CACHE": str(hf_home / "datasets"),
     }
+    target_environment = os.environ if environ is None else environ
+    if bool(runtime.get("direct_cuda_load", False)):
+        selected["BEHAVIOR1K_PI05_DIRECT_CUDA_LOAD"] = "1"
+    else:
+        target_environment.pop("BEHAVIOR1K_PI05_DIRECT_CUDA_LOAD", None)
     if bool(runtime.get("offline", True)):
         selected.update(
             {
@@ -100,7 +105,7 @@ def configure_runtime_environment(
                 "TRANSFORMERS_OFFLINE": "1",
             }
         )
-    (os.environ if environ is None else environ).update(selected)
+    target_environment.update(selected)
     return selected
 
 

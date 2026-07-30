@@ -231,6 +231,10 @@ def build_environment(config: dict[str, Any], project_root: Path) -> dict[str, s
     env["HUGGINGFACE_HUB_CACHE"] = str(hf_home / "hub")
     env["HF_DATASETS_CACHE"] = str(hf_home / "datasets")
     env["NCCL_DEBUG"] = str(runtime.get("nccl_debug", "WARN"))
+    if bool(runtime.get("direct_cuda_load", False)):
+        env["BEHAVIOR1K_PI05_DIRECT_CUDA_LOAD"] = "1"
+    else:
+        env.pop("BEHAVIOR1K_PI05_DIRECT_CUDA_LOAD", None)
     if bool(runtime.get("offline", True)):
         env["HF_HUB_OFFLINE"] = "1"
         env["HF_DATASETS_OFFLINE"] = "1"

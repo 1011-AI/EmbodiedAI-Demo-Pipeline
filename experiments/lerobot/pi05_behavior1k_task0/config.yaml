@@ -92,3 +92,8 @@ runtime:
   offline: true
   hf_home: hf_cache
   nccl_debug: WARN
+
+  # LeRobot 0.6.1 默认先在 CPU 构造模型并把 14 GB safetensors 读到 CPU，
+  # 容器内存限制较小时会在使用 GPU 前被 OOM kill。开启后，模型参数和权重
+  # 直接落到 Accelerate 为当前 rank 选择的 CUDA device；不修改上游源码。
+  direct_cuda_load: true
