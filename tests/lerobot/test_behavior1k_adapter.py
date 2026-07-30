@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import sys
 import types
 from dataclasses import dataclass
@@ -108,6 +109,19 @@ class FakeDataset:
 def _write_view(tmp_path: Path, *, stats: dict | None = None) -> Path:
     view_dir = tmp_path / "view"
     view_dir.mkdir()
+    raw_root = tmp_path / "raw"
+    (raw_root / "meta/episodes/chunk-000").mkdir(parents=True)
+    (raw_root / "meta/info.json").write_text(
+        json.dumps({"features": _features()}),
+        encoding="utf-8",
+    )
+    (raw_root / "meta/stats.json").write_text("{}", encoding="utf-8")
+    (raw_root / "meta/tasks.parquet").write_bytes(b"tasks")
+    (raw_root / "meta/episodes/chunk-000/file-000.parquet").write_bytes(b"episodes")
+    (raw_root / ".dataset_revision").write_text(
+        "2add61313bac4f1a42363d00ad03bd45949941a8\n",
+        encoding="utf-8",
+    )
     manifest = {
         "source_repo_id": "behavior-1k/2026-challenge-demos",
         "source_revision": "2add61313bac4f1a42363d00ad03bd45949941a8",
@@ -193,6 +207,44 @@ def test_load_view_requires_real_23d_quantile_stats(tmp_path: Path) -> None:
     view_dir = _write_view(tmp_path, stats=stats)
 
     with pytest.raises(BehaviorLeRobotAdapterError, match="23 values"):
+        load_behavior_view(view_dir)
+
+
+def test_data_root_environment_safely_remaps_management_mount(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    view_dir = _write_view(tmp_path)
+    gpu_visible_root = tmp_path / "gpu-visible"
+    shutil.copytree(tmp_path / "raw", gpu_visible_root)
+    monkeypatch.setenv("BEHAVIOR1K_DATA_ROOT", str(gpu_visible_root))
+
+    view = load_behavior_view(view_dir)
+
+    assert view.root == gpu_visible_root.resolve()
+
+
+def test_data_root_environment_rejects_missing_override(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    view_dir = _write_view(tmp_path)
+    missing = tmp_path / "not-mounted"
+    monkeypatch.setenv("BEHAVIOR1K_DATA_ROOT", str(missing))
+
+    with pytest.raises(BehaviorLeRobotAdapterError, match="does not exist"):
+        load_behavior_view(view_dir)
+
+
+def test_view_rejects_missing_manifest_source_root(tmp_path: Path) -> None:
+    view_dir = _write_view(tmp_path)
+    missing_root = tmp_path / "missing"
+    manifest_path = view_dir / "view_manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["source_root"] = str(missing_root)
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(BehaviorLeRobotAdapterError, match="view manifest source_root"):
         load_behavior_view(view_dir)
 
 

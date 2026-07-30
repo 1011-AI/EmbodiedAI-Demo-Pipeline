@@ -1,5 +1,5 @@
 schema_version: "1.0"
-updated: "2026-07-14"
+updated: "2026-07-30"
 # 模型注册表：用于说明每条模型路线的状态、资产位置、启动入口和能力边界。
 # 它帮助团队判断“该跑哪个入口”，但不存放任何权重、数据或私密路径。
 purpose: >
@@ -30,9 +30,65 @@ storage:
     - private real-robot videos
 
 models:
+  lerobot_pi05_behavior1k_2026:
+    status: configured_base_verified_paligemma_cache_pending_gpu_run
+    path_type: lerobot_native
+    policy_type: pi05
+    dataset_repo_id: behavior-1k/2026-challenge-demos
+    dataset_revision: 2add61313bac4f1a42363d00ad03bd45949941a8
+    policy_repo_id: lerobot/pi05_base
+    policy_revision: b211f3d44c36b6acfcf7ae94a64e8e96f75a64ba
+    runtime_tokenizer_repo_id: google/paligemma-3b-pt-224
+    runtime_tokenizer_revision: 35e4f46485b4d07967e7e9935bc3786aad50687c
+    default_config: experiments/lerobot/pi05_behavior1k_task0/config.yaml
+    smoke_targets:
+      - python experiments/lerobot/pi05_behavior1k_task0/run.py --dry-run
+      - python experiments/lerobot/pi05_behavior1k_task0/run.py
+      - python experiments/lerobot/pi05_behavior1k_task0/run.py --mode infer
+    artifact_location:
+      policy_path: "$EMBODIED_MODEL_ROOT/lerobot/pi05/pi05_base"
+      task_view: "$EMBODIED_DATA_ROOT/behavior1k/views/r1pro_policy23/turning_on_radio"
+      training_runs: "$EMBODIED_RUN_ROOT/experiments/lerobot/pi05_behavior1k_task0"
+    verified_artifacts:
+      model_safetensors_bytes: 14467165872
+      model_safetensors_sha256: 0eb11ca9587678c1d2ef8cf32807c29f8ce53a2bfdfc1aa4a4c96f16fca59b0f
+    capability_claim: configured_real_posttraining_offline_inference_and_policy_server
+    notes:
+      - Uses LeRobot/PyTorch checkpoints; OpenPI/JAX checkpoints are not compatible.
+      - Requires the gated google/paligemma-3b-pt-224 tokenizer in the project HF cache.
+      - Policy server is protocol-tested but has not yet loaded this checkpoint on the current GPU node.
+      - GPU loss decrease and checkpoint forward evidence are not yet claimed.
+
+  fastwam_behavior1k_2026:
+    status: configured_assets_verified_pending_gpu_run
+    path_type: custom_backend
+    policy_family: fastwam
+    dataset_repo_id: behavior-1k/2026-challenge-demos
+    dataset_revision: 2add61313bac4f1a42363d00ad03bd45949941a8
+    default_config: experiments/custom/fastwam_behavior1k_task0/config.yaml
+    smoke_targets:
+      - python experiments/custom/fastwam_behavior1k_task0/run.py --prepare-only
+      - python experiments/custom/fastwam_behavior1k_task0/run.py --dataset-smoke
+      - python experiments/custom/fastwam_behavior1k_task0/run.py
+    artifact_location:
+      release_weights: "$EMBODIED_MODEL_ROOT/custom/fastwam/release/libero_uncond_2cam224.pt"
+      wan_runtime_assets: "$EMBODIED_MODEL_ROOT/Wan-AI"
+      training_runs: "$EMBODIED_RUN_ROOT/experiments/custom/fastwam_behavior1k_task0"
+    verified_artifacts:
+      release_checkpoint_bytes: 12041735140
+      release_checkpoint_sha256: 1000437cfcf55c000094f79a2600634c502bcb5b492476b94bf8509883a49579
+      t5_encoder_bytes: 11361920418
+      t5_encoder_sha256: 7cace0da2b446bbbbc57d031ab6cf163a3d59b366da94e5afe36745b746fd81d
+    capability_claim: configured_real_posttraining_inference_and_policy_server
+    notes:
+      - Reinitializes the incompatible 7D action head and old proprio input while loading shape-compatible backbone weights.
+      - Every real checkpoint load must write model_load_report.json.
+      - Inference reuses the native processor, exact task prompt cache, and 23D inverse-normalization path.
+      - GPU one-step training and loss evidence are not yet claimed.
+
   # LeRobot 轻量基线：最适合第一次证明训练 loss 能下降。
   lerobot_act_pusht:
-    status: gpu_smoke_verified
+    status: historical_gpu_smoke_verified
     path_type: lerobot_native
     policy_type: act
     policy_class: lerobot.policies.act.modeling_act.ACTPolicy
@@ -137,7 +193,7 @@ models:
       - Keep batch size adjustable; start with batch_size=8 on A100/A800 and reduce if needed.
 
   lerobot_fastwam_libero:
-    status: downloaded_on_scut
+    status: historical_downloaded_on_scut
     path_type: lerobot_native
     policy_type: fastwam
     dataset_repo_id: yuanty/LIBERO-fastwam
@@ -172,7 +228,7 @@ models:
 
   # custom/FastWAM 主线：当前已跑通 single-node 8-GPU 真实训练。
   fastwam_realrobot_custom_backend:
-    status: single8_training_verified_on_scut
+    status: historical_single8_training_verified_on_scut
     path_type: custom_backend
     upstream: yuantianyuan01/FastWAM
     overlay: D-URing/fastwam-realrobot-pipeline

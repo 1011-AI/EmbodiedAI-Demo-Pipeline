@@ -73,6 +73,32 @@ def _run_id(config: dict[str, Any]) -> str:
     return datetime.now().strftime("%Y%m%d_%H%M%S_%f")
 
 
+def _resolve_local_processes(value: Any) -> int:
+    if str(value).strip().lower() != "auto":
+        resolved = int(value)
+        if resolved <= 0:
+            raise SystemExit("ERROR: distributed.num_processes must be positive")
+        return resolved
+
+    platform_count = os.environ.get("NPROC_PER_NODE", "").strip()
+    if platform_count:
+        resolved = int(platform_count)
+        if resolved > 0:
+            return resolved
+    visible = os.environ.get("CUDA_VISIBLE_DEVICES")
+    if visible is not None and visible.strip() and visible.strip() != "-1":
+        return len([item for item in visible.split(",") if item.strip()])
+    try:
+        import torch
+
+        detected = int(torch.cuda.device_count())
+    except ImportError:
+        detected = 0
+    # A management-node dry-run still needs a deterministic command.  Real
+    # execution performs CUDA preflight and therefore cannot silently use CPU.
+    return detected if detected > 0 else 1
+
+
 def build_train_command(
     config: dict[str, Any],
     *,
@@ -87,13 +113,11 @@ def build_train_command(
     distributed = _mapping(config, "distributed")
     experiment = _mapping(config, "experiment")
 
-    num_processes = int(
+    num_processes = _resolve_local_processes(
         num_processes_override
         if num_processes_override is not None
-        else distributed.get("num_processes", 1)
+        else distributed.get("num_processes", "auto")
     )
-    if num_processes <= 0:
-        raise SystemExit("ERROR: distributed.num_processes must be positive")
     num_machines = int(distributed.get("num_machines", 1))
     if num_machines <= 0:
         raise SystemExit("ERROR: distributed.num_machines must be positive")
@@ -245,10 +269,10 @@ def _preflight(
     if not torch.cuda.is_available():
         raise SystemExit("ERROR: CUDA is required; CPU fallback is disabled")
     if mode == "train":
-        configured = int(
+        configured = _resolve_local_processes(
             num_processes
             if num_processes is not None
-            else _mapping(config, "distributed").get("num_processes", 1)
+            else _mapping(config, "distributed").get("num_processes", "auto")
         )
         if torch.cuda.device_count() < configured:
             raise SystemExit(

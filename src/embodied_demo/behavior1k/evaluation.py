@@ -28,6 +28,7 @@ from embodied_demo.schemas.base import StrictModel
 REQUIRED_BEHAVIOR_TAG = "v3.9.1"
 REQUIRED_BEHAVIOR_COMMIT = "26f2c7ef7b9cf96bd0414f81e1e751e493762779"
 DEFAULT_EVALUATOR_MODULE = "omnigibson.eval.eval"
+PUBLIC_TEST_INSTANCE_COUNT = 20
 
 
 class BehaviorEvaluationError(PipelineError):
@@ -88,10 +89,14 @@ class OfficialEvaluationConfig(StrictModel):
     def validate_public_indices(self) -> "OfficialEvaluationConfig":
         if len(set(self.instance_indices)) != len(self.instance_indices):
             raise ValueError("evaluation.instance_indices must be unique")
-        invalid = [index for index in self.instance_indices if not 0 <= index <= 9]
+        invalid = [
+            index
+            for index in self.instance_indices
+            if not 0 <= index < PUBLIC_TEST_INSTANCE_COUNT
+        ]
         if invalid:
             raise ValueError(
-                "public_test instance indices must be in [0, 9]; "
+                "public_test instance indices must be in [0, 19]; "
                 f"invalid values: {invalid}"
             )
         return self
@@ -790,6 +795,7 @@ __all__ = [
     "ResolvedEvaluationPlan",
     "REQUIRED_BEHAVIOR_COMMIT",
     "REQUIRED_BEHAVIOR_TAG",
+    "PUBLIC_TEST_INSTANCE_COUNT",
     "build_evaluator_command",
     "format_dry_run",
     "load_evaluator_config",

@@ -2,7 +2,7 @@ PYTHON ?= python3.11
 VENV ?= .venv
 CONSTRAINTS ?= requirements/constraints-py311.txt
 
-.PHONY: help setup doctor test validate prepare-dirs prepare-assets-lerobot prepare-lerobot-pi05-so100-assets prepare-assets-custom-fastwam prepare-sources-custom-fastwam prepare-env-custom-fastwam prepare-assets-imagewam check-assets check-assets-core check-assets-lerobot check-assets-custom-fastwam check-assets-imagewam download-lerobot-artifacts download-lerobot-pusht-dataset download-lerobot-svla-so100-pickplace-dataset augment-lerobot-svla-so100-quantile-stats download-lerobot-fastwam-libero-dataset convert-lerobot-fastwam-libero-v3 download-lerobot-fastwam-base-cache download-lerobot-diffusion-pusht-policy download-lerobot-smolvla-base-policy download-lerobot-pi05-base-policy download-lerobot-pi05-runtime-cache download-lerobot-fastwam-libero-policy download-data-rovid20k download-data-rovidx download-data-mdm-depth download-data-xperience10m-sample download-data-abc130k download-data-agibotworld-alpha download-data-interndata-a1 download-custom-fastwam-libero-dataset download-fastwam-artifacts prepare-imagewam-upstream download-imagewam-artifacts download-imagewam-flux2-base lerobot-check-scripts fastwam-check-scripts imagewam-check-scripts experiments-check-scripts lerobot-data-smoke schemas clean
+.PHONY: help setup doctor test validate prepare-dirs prepare-assets-lerobot prepare-lerobot-pi05-so100-assets prepare-assets-custom-fastwam prepare-sources-custom-fastwam prepare-env-custom-fastwam prepare-assets-imagewam check-assets check-assets-core check-assets-lerobot check-assets-lerobot-pi05 check-assets-custom-fastwam check-assets-imagewam download-lerobot-artifacts download-lerobot-pusht-dataset download-lerobot-svla-so100-pickplace-dataset augment-lerobot-svla-so100-quantile-stats download-lerobot-fastwam-libero-dataset convert-lerobot-fastwam-libero-v3 download-lerobot-fastwam-base-cache download-lerobot-diffusion-pusht-policy download-lerobot-smolvla-base-policy download-lerobot-pi05-base-policy download-lerobot-pi05-runtime-cache download-lerobot-fastwam-libero-policy download-data-rovid20k download-data-rovidx download-data-mdm-depth download-data-xperience10m-sample download-data-abc130k download-data-agibotworld-alpha download-data-interndata-a1 download-custom-fastwam-libero-dataset download-fastwam-artifacts prepare-imagewam-upstream download-imagewam-artifacts download-imagewam-flux2-base lerobot-check-scripts fastwam-check-scripts imagewam-check-scripts experiments-check-scripts lerobot-data-smoke schemas clean
 
 help:
 	@echo "EmbodiedAI Demo Pipeline"
@@ -19,6 +19,7 @@ help:
 	@echo "  make experiments-check-scripts     Check experiment launch/config scripts"
 	@echo "  make prepare-dirs                  Create repo-local asset directories"
 	@echo "  make check-assets                  Check repo-local data/model/cache assets"
+	@echo "  make check-assets-lerobot-pi05     Check the complete pi05 base + PaliGemma runtime set"
 	@echo
 	@echo "Bootstrap 资产和环境准备:"
 	@echo "  make prepare-assets-lerobot        下载第一批 LeRobot 数据、policy 和 base cache"
@@ -140,6 +141,9 @@ check-assets-core:
 check-assets-lerobot:
 	$(PYTHON) scripts/check_assets.py --profile lerobot
 
+check-assets-lerobot-pi05:
+	$(PYTHON) scripts/check_assets.py --profile lerobot-pi05
+
 check-assets-custom-fastwam:
 	$(PYTHON) scripts/check_assets.py --profile custom-fastwam
 
@@ -201,6 +205,7 @@ download-lerobot-pi05-base-policy:
 	ARTIFACT_MANIFEST_NAME=lerobot_pi05_base_policy_manifest.json \
 	LEROBOT_POLICY_TYPE=pi05 \
 	LEROBOT_POLICY_REPO_ID=lerobot/pi05_base \
+	LEROBOT_POLICY_REVISION=b211f3d44c36b6acfcf7ae94a64e8e96f75a64ba \
 	LEROBOT_POLICY_LOCAL_DIR="$${EMBODIED_MODEL_ROOT:-$$(pwd)/models}/lerobot/pi05/pi05_base" \
 	bash scripts/lerobot/download_artifacts.sh
 
@@ -209,6 +214,7 @@ download-lerobot-pi05-runtime-cache:
 	HUGGINGFACE_HUB_CACHE="$${HUGGINGFACE_HUB_CACHE:-$$(pwd)/hf_cache/hub}" \
 	HF_HUB_DISABLE_XET="$${HF_HUB_DISABLE_XET:-1}" \
 	hf download google/paligemma-3b-pt-224 \
+	  --revision 35e4f46485b4d07967e7e9935bc3786aad50687c \
 	  --include "config.json" \
 	  --include "tokenizer*" \
 	  --include "special_tokens_map.json" \

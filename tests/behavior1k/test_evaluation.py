@@ -12,6 +12,7 @@ from embodied_demo.behavior1k.evaluation import (
     BehaviorEvaluationError,
     BehaviorRuntimeConfig,
     BehaviorVersionInfo,
+    PUBLIC_TEST_INSTANCE_COUNT,
     REQUIRED_BEHAVIOR_COMMIT,
     build_evaluator_command,
     format_dry_run,
@@ -82,6 +83,31 @@ def test_task0_public_config_composes_and_pins_v391() -> None:
     assert [path.name for path in sources] == ["base.yaml", "task0_public_0_9.yaml"]
 
 
+def test_task0_full_public_config_covers_all_official_indices() -> None:
+    config, sources = load_evaluator_config(CONFIG_ROOT / "task0_public_0_19.yaml")
+
+    assert config.evaluation.instance_indices == list(
+        range(PUBLIC_TEST_INSTANCE_COUNT)
+    )
+    assert config.evaluation.max_steps is None
+    assert config.evaluation.write_video is True
+    assert [path.name for path in sources] == [
+        "base.yaml",
+        "task0_public_0_19.yaml",
+    ]
+
+
+def test_public_split_accepts_all_20_official_indices() -> None:
+    config, _ = load_evaluator_config(CONFIG_ROOT / "task0_smoke.yaml")
+    payload = config.model_dump(mode="python")
+    payload["evaluation"]["instance_indices"] = [PUBLIC_TEST_INSTANCE_COUNT - 1]
+    evaluation.BehaviorEvaluatorConfig.model_validate(payload)
+
+    payload["evaluation"]["instance_indices"] = [PUBLIC_TEST_INSTANCE_COUNT]
+    with pytest.raises(ValueError, match=r"\[0, 19\]"):
+        evaluation.BehaviorEvaluatorConfig.model_validate(payload)
+
+
 def test_command_is_direct_official_evaluator_invocation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -98,6 +124,7 @@ def test_command_is_direct_official_evaluator_invocation(
     assert command[command.index("--host") + 1] == "127.0.0.1"
     assert command[command.index("--port") + 1] == "8000"
     assert command[command.index("--instance-indices") + 1] == "0"
+    assert command[command.index("--instance-indices") + 2] == "--num-rollouts"
     assert command[command.index("--max-steps") + 1] == "10"
     assert "--no-write-video" in command
     assert "--policy" in command

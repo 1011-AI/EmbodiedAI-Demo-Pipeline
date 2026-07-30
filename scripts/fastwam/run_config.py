@@ -67,6 +67,33 @@ def env_override(name: str, value: Any) -> str:
     return str(value)
 
 
+def resolve_gpus_per_node(value: Any) -> str:
+    raw = env_override("FASTWAM_GPUS_PER_NODE", value).strip()
+    if raw.lower() != "auto":
+        count = int(raw)
+        if count <= 0:
+            raise SystemExit("ERROR: distributed.gpus_per_node must be positive")
+        return str(count)
+
+    platform_count = os.environ.get("NPROC_PER_NODE", "").strip()
+    if platform_count:
+        count = int(platform_count)
+        if count > 0:
+            return str(count)
+    visible = os.environ.get("CUDA_VISIBLE_DEVICES")
+    if visible is not None and visible.strip() and visible.strip() != "-1":
+        return str(len([item for item in visible.split(",") if item.strip()]))
+    try:
+        import torch
+
+        detected = int(torch.cuda.device_count())
+    except ImportError:
+        detected = 0
+    # Keep management-node dry-runs deterministic.  The real launcher still
+    # refuses CPU execution before starting FastWAM.
+    return str(detected if detected > 0 else 1)
+
+
 def export_line(name: str, value: Any) -> str:
     return f"export {name}={shlex.quote(bool_text(value))}"
 
@@ -128,7 +155,9 @@ def build_env(config: dict[str, Any], project_root: Path, config_path: Path) -> 
         "FASTWAM_MODE": str(fastwam.get("mode", "pilot")),
         "FASTWAM_RECIPE": str(fastwam.get("recipe", "v6_scratch")),
         "FASTWAM_INIT": str(fastwam.get("init", "random")),
-        "FASTWAM_GPUS_PER_NODE": env_override("FASTWAM_GPUS_PER_NODE", distributed.get("gpus_per_node", 8)),
+        "FASTWAM_GPUS_PER_NODE": resolve_gpus_per_node(
+            distributed.get("gpus_per_node", "auto")
+        ),
         "FASTWAM_NNODES": env_override("FASTWAM_NNODES", distributed.get("nnodes", 1)),
         "FASTWAM_NODE_RANK": env_override("FASTWAM_NODE_RANK", distributed.get("node_rank", 0)),
         "FASTWAM_MASTER_ADDR": env_override("FASTWAM_MASTER_ADDR", distributed.get("master_addr", "127.0.0.1")),

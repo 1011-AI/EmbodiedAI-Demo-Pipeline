@@ -67,3 +67,11 @@ def test_infer_command_uses_real_checkpoint_inference_module(tmp_path: Path) -> 
         if value.startswith("--checkpoint=")
     )
     assert "--num-inference-steps=10" in command
+
+
+def test_auto_process_count_prefers_platform_allocation(monkeypatch) -> None:
+    runner = _load_runner()
+    monkeypatch.setenv("NPROC_PER_NODE", "4")
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0,1")
+
+    assert runner._resolve_local_processes("auto") == 4

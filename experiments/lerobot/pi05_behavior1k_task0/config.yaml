@@ -69,8 +69,10 @@ training:
   wandb: false
 
 distributed:
-  # 单机进程数，也就是默认使用的 GPU 数；按节点卡数直接修改。
-  num_processes: 8
+  # auto 优先读取平台 NPROC_PER_NODE，其次读取 CUDA_VISIBLE_DEVICES / torch。
+  # 因此同一配置可在单卡、4 卡或 8 卡节点直接运行；仍可用 run.py
+  # 的 --num-processes 做一次性显式覆盖。
+  num_processes: auto
   mixed_precision: bf16
 
   # 当前入口同时支持平台向每个节点注入这些参数。单机无需修改。

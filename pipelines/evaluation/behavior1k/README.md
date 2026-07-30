@@ -82,11 +82,18 @@ python pipelines/evaluation/behavior1k/run.py \
   --config pipelines/evaluation/behavior1k/configs/task0_smoke.yaml
 ```
 
-正式 public indices 0–9：
+第一批 public indices 0–9：
 
 ```bash
 python pipelines/evaluation/behavior1k/run.py \
   --config pipelines/evaluation/behavior1k/configs/task0_public_0_9.yaml
+```
+
+官方 v3.9.1 完整 public split 是 indices 0–19：
+
+```bash
+python pipelines/evaluation/behavior1k/run.py \
+  --config pipelines/evaluation/behavior1k/configs/task0_public_0_19.yaml
 ```
 
 换端口或结果目录不需要改 YAML：

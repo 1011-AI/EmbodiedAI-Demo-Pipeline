@@ -119,6 +119,77 @@ def _load_episode_indices(path: Path) -> tuple[int, ...]:
     return tuple(indices)
 
 
+def _validate_dataset_root(
+    root: Path,
+    *,
+    expected_revision: str,
+    expected_episode_count: int,
+) -> None:
+    required_files = (
+        root / "meta/info.json",
+        root / "meta/stats.json",
+        root / "meta/tasks.parquet",
+    )
+    missing = [str(path) for path in required_files if not path.is_file()]
+    episode_metadata = root / "meta/episodes"
+    if not episode_metadata.is_dir() or not next(
+        episode_metadata.glob("*/*.parquet"),
+        None,
+    ):
+        missing.append(str(episode_metadata / "*/*.parquet"))
+    if missing:
+        raise BehaviorLeRobotAdapterError(
+            "resolved BEHAVIOR1K_DATA_ROOT is incomplete; missing required LeRobot v3 "
+            f"metadata: {missing}"
+        )
+
+    revision_marker = root / ".dataset_revision"
+    if revision_marker.is_file():
+        actual_revision = revision_marker.read_text(encoding="utf-8").strip()
+        if actual_revision != expected_revision:
+            raise BehaviorLeRobotAdapterError(
+                "dataset revision marker does not match the task view: "
+                f"expected {expected_revision}, got {actual_revision}"
+            )
+
+    materialization_manifest = root / "materialization_manifest.json"
+    if materialization_manifest.is_file():
+        materialization = _read_json_object(materialization_manifest)
+        source = materialization.get("source")
+        projection = materialization.get("projection")
+        if not isinstance(source, Mapping) or not isinstance(projection, Mapping):
+            raise BehaviorLeRobotAdapterError(
+                f"invalid materialization manifest structure: {materialization_manifest}"
+            )
+        if str(source.get("revision", "")) != expected_revision:
+            raise BehaviorLeRobotAdapterError(
+                "materialized dataset revision does not match the task view: "
+                f"{materialization_manifest}"
+            )
+        try:
+            materialized_episode_count = int(projection.get("episode_count", -1))
+        except (TypeError, ValueError) as exc:
+            raise BehaviorLeRobotAdapterError(
+                "materialized dataset has an invalid episode count: "
+                f"{materialization_manifest}"
+            ) from exc
+        if materialized_episode_count != expected_episode_count:
+            raise BehaviorLeRobotAdapterError(
+                "materialized dataset episode count does not match the task view: "
+                f"{materialization_manifest}"
+            )
+        if tuple(str(key) for key in projection.get("video_keys", ())) != RGB_VIDEO_KEYS:
+            raise BehaviorLeRobotAdapterError(
+                "materialized dataset does not declare the canonical three RGB cameras: "
+                f"{materialization_manifest}"
+            )
+        if projection.get("includes_depth") is not False:
+            raise BehaviorLeRobotAdapterError(
+                "phase-one materialized dataset must explicitly declare includes_depth=false: "
+                f"{materialization_manifest}"
+            )
+
+
 def _resolve_stats_path(
     view_dir: Path,
     explicit_path: str | Path | None,
@@ -266,7 +337,30 @@ def load_behavior_view(
     # A view may be prepared on a management node and consumed through the
     # same shared data at another mount point on a GPU node.
     configured_root = os.environ.get("BEHAVIOR1K_DATA_ROOT", raw_root)
+    if not str(configured_root).strip():
+        raise BehaviorLeRobotAdapterError(
+            "BEHAVIOR1K_DATA_ROOT is set but empty; unset it or point it to a readable dataset root"
+        )
     root = Path(configured_root).expanduser().resolve()
+    if not root.is_dir():
+        source = (
+            "BEHAVIOR1K_DATA_ROOT override"
+            if "BEHAVIOR1K_DATA_ROOT" in os.environ
+            else "view manifest source_root"
+        )
+        raise BehaviorLeRobotAdapterError(
+            f"{source} does not exist or is not a directory: {root}. "
+            "On a GPU node with a different mount prefix, set BEHAVIOR1K_DATA_ROOT "
+            "to the materialized task root."
+        )
+    source_revision = str(manifest.get("source_revision", "")).strip()
+    if not source_revision:
+        raise BehaviorLeRobotAdapterError("view manifest does not define source_revision")
+    _validate_dataset_root(
+        root,
+        expected_revision=source_revision,
+        expected_episode_count=len(episode_indices),
+    )
     task = manifest.get("task")
     task_instruction = (
         str(task.get("instruction", "")).strip()
@@ -281,7 +375,7 @@ def load_behavior_view(
         root=root,
         stats_path=resolved_stats_path,
         source_repo_id=str(manifest.get("source_repo_id", "")),
-        source_revision=str(manifest.get("source_revision", "")),
+        source_revision=source_revision,
         episode_indices=episode_indices,
         video_keys=video_keys,
         state_contract=state_contract,

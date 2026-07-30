@@ -49,7 +49,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--instance-indices",
         nargs="+",
         type=int,
-        help="临时覆盖 public_test split indices，例如 0 1 2；范围必须为 0..9。",
+        help="临时覆盖 public_test split indices，例如 0 1 2；官方范围为 0..19。",
     )
     parser.add_argument(
         "--output-dir",

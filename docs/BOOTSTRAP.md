@@ -1,5 +1,10 @@
 # Bootstrap: prepare a usable workspace
 
+> [!WARNING]
+> Legacy 文档。这里的 SCUT 路径、conda 环境名和节点假设已经失效，不得用于当前
+> BEHAVIOR-1K 2026 部署。当前准备入口以
+> [`BEHAVIOR1K_2026.md`](BEHAVIOR1K_2026.md) 为准。
+
 这份文档只回答一个问题：**一个新 checkout 怎么变成可以跑训练/推理的工作区？**
 
 成熟项目通常把准备阶段拆成四步：

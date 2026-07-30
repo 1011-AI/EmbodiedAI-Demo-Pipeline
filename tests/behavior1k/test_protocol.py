@@ -220,6 +220,7 @@ def test_reset_frame_has_no_ack_and_clears_policy_and_chunk_state() -> None:
 
     after_reset = unpackb(session.handle_frame(packb({"offset": 20})))
     assert float(after_reset["action"][0]) == 20.0
+    assert "prev_total_ms" not in after_reset["server_timing"]
     assert policy.predict_calls == 2
 
 

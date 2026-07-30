@@ -153,6 +153,35 @@ def test_fastwam_prepare_uses_overlay_without_vendoring() -> None:
     assert "--exclude \"checkpoints/\"" in prepare
 
 
+def test_fastwam_behavior_config_auto_detects_platform_gpu_count(
+    tmp_path: Path,
+) -> None:
+    config = ROOT / "experiments/custom/fastwam_behavior1k_task0/config.yaml"
+    generated = tmp_path / "behavior_generated.sh"
+
+    import subprocess
+    import sys
+
+    subprocess.run(
+        [
+            sys.executable,
+            str(ROOT / "scripts/fastwam/run_config.py"),
+            "--config",
+            str(config),
+            "--dry-run",
+            "--output-shell",
+            str(generated),
+        ],
+        cwd=ROOT,
+        env={**os.environ, "NPROC_PER_NODE": "4"},
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+
+    assert "export FASTWAM_GPUS_PER_NODE=4" in generated.read_text(encoding="utf-8")
+
+
 def test_fastwam_release_download_script_tracks_public_artifacts() -> None:
     runner = (ROOT / "scripts/fastwam/download_release_artifacts.sh").read_text(encoding="utf-8")
     makefile = (ROOT / "Makefile").read_text(encoding="utf-8")

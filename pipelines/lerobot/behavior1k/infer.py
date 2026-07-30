@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
+import io
 import json
 import math
+import sys
 import time
 from pathlib import Path
 from typing import Any
@@ -15,9 +18,52 @@ from embodied_demo.behavior1k.r1pro import ACTION_DIM, RGB_VIDEO_KEYS
 from .adapter import (
     ACTION,
     BehaviorLeRobotAdapterError,
+    adapt_lerobot_metadata,
     adapt_lerobot_dataset,
     load_behavior_view,
 )
+
+_LOAD_SUCCESS_MARKERS = (
+    "Loaded state dict from model.safetensors",
+    "All keys loaded successfully!",
+)
+_LOAD_FAILURE_MARKERS = (
+    "Returning model without loading pretrained weights",
+    "Warning: Could not load state dict",
+)
+
+
+class _TeeStdout(io.StringIO):
+    """Capture pinned LeRobot load evidence while keeping startup logs visible."""
+
+    def __init__(self, target: Any | None = None) -> None:
+        super().__init__()
+        # Save the original stream before redirect_stdout replaces sys.stdout
+        # with this object. Looking up sys.stdout in write() would recurse.
+        self._target = target if target is not None else sys.stdout
+
+    def write(self, value: str) -> int:
+        self._target.write(value)
+        return super().write(value)
+
+    def flush(self) -> None:
+        self._target.flush()
+        super().flush()
+
+
+def _validate_checkpoint_load_output(output: str) -> None:
+    """Reject LeRobot's random-weight fallback using pinned load markers."""
+
+    failed_markers = [marker for marker in _LOAD_FAILURE_MARKERS if marker in output]
+    missing_markers = [
+        marker for marker in _LOAD_SUCCESS_MARKERS if marker not in output
+    ]
+    if failed_markers or missing_markers:
+        raise BehaviorLeRobotAdapterError(
+            "LeRobot did not prove a complete PI0.5 checkpoint load; refusing "
+            "to continue with potentially random weights. "
+            f"failure_markers={failed_markers}, missing_success_markers={missing_markers}"
+        )
 
 
 def _resolve_pretrained_dir(path: Path) -> Path:
@@ -45,6 +91,198 @@ def _tensor_summary(value: Any) -> dict[str, Any]:
     }
 
 
+class Pi05InferenceRuntime:
+    """Loaded LeRobot PI0.5 policy plus its real pre/post processors."""
+
+    def __init__(
+        self,
+        *,
+        policy: Any,
+        preprocessor: Any,
+        postprocessor: Any,
+        torch_module: Any,
+        pretrained_dir: Path,
+    ) -> None:
+        self.policy = policy
+        self.preprocessor = preprocessor
+        self.postprocessor = postprocessor
+        self.torch = torch_module
+        self.pretrained_dir = pretrained_dir
+
+    def reset(self) -> None:
+        """Clear all model-side recurrent/action queue state."""
+
+        self.policy.reset()
+
+    def predict_action_chunk(
+        self,
+        sample: dict[str, Any],
+        *,
+        num_inference_steps: int | None = None,
+    ) -> Any:
+        """Run the same processor/model/postprocessor chain used offline."""
+
+        torch = self.torch
+        model_input = dict(sample)
+        # Action is a training target, not an inference input.
+        model_input.pop(ACTION, None)
+        for key in tuple(model_input):
+            if key.endswith("_is_pad"):
+                model_input.pop(key)
+        for camera_key in RGB_VIDEO_KEYS:
+            if camera_key not in model_input:
+                raise BehaviorLeRobotAdapterError(
+                    f"PI0.5 inference input is missing camera {camera_key}"
+                )
+            image = model_input[camera_key]
+            if image.dtype == torch.uint8:
+                model_input[camera_key] = image.to(dtype=torch.float32) / 255.0
+
+        processed = self.preprocessor(model_input)
+        inference_kwargs: dict[str, int] = {}
+        if num_inference_steps is not None:
+            inference_kwargs["num_steps"] = num_inference_steps
+
+        with torch.inference_mode():
+            action_chunk = self.policy.predict_action_chunk(
+                processed,
+                **inference_kwargs,
+            )
+            action_chunk = self.postprocessor(action_chunk)
+
+        if action_chunk.ndim != 3 or action_chunk.shape[-1] != ACTION_DIM:
+            raise BehaviorLeRobotAdapterError(
+                "PI0.5 inference returned an invalid action chunk shape: "
+                f"{tuple(action_chunk.shape)}"
+            )
+        if action_chunk.shape[0] != 1:
+            raise BehaviorLeRobotAdapterError(
+                "online PI0.5 inference requires batch size 1, got "
+                f"{action_chunk.shape[0]}"
+            )
+        if not bool(torch.isfinite(action_chunk).all()):
+            raise BehaviorLeRobotAdapterError(
+                "PI0.5 inference returned non-finite actions"
+            )
+        return action_chunk
+
+
+def _make_pi05_runtime(
+    *,
+    checkpoint: Path,
+    device: str,
+    dataset_meta: Any,
+) -> Pi05InferenceRuntime:
+    """Load the real checkpoint and processors against adapted dataset metadata."""
+
+    try:
+        import torch
+        from lerobot.policies import make_policy, make_pre_post_processors
+        from lerobot.policies.pi05.configuration_pi05 import PI05Config
+    except ImportError as exc:
+        raise BehaviorLeRobotAdapterError(
+            "PI0.5 inference requires the pinned LeRobot training environment"
+        ) from exc
+
+    if device.startswith("cuda") and not torch.cuda.is_available():
+        raise BehaviorLeRobotAdapterError(
+            "CUDA inference requested but CUDA is unavailable"
+        )
+
+    pretrained_dir = _resolve_pretrained_dir(checkpoint.expanduser().resolve())
+    weights_path = pretrained_dir / "model.safetensors"
+    if not weights_path.is_file() or weights_path.stat().st_size <= 0:
+        raise BehaviorLeRobotAdapterError(
+            f"PI0.5 checkpoint has no non-empty model.safetensors: {weights_path}"
+        )
+    policy_config = PI05Config.from_pretrained(str(pretrained_dir))
+    if policy_config.use_relative_actions:
+        raise BehaviorLeRobotAdapterError(
+            "PI0.5 checkpoint declares use_relative_actions=true, but the current "
+            "BEHAVIOR R1Pro 23D server contract requires mixed absolute actions"
+        )
+    policy_config.pretrained_path = pretrained_dir
+    policy_config.device = device
+    # Infer the Behavior 23D + three-RGB feature contract from the adapted
+    # metadata even when the supplied checkpoint is the generic PI0.5 base.
+    policy_config.input_features = {}
+    policy_config.output_features = {}
+    # Pinned LeRobot 0.6.1 currently catches checkpoint loading exceptions and
+    # returns a randomly initialized model.  Treat that upstream fallback as a
+    # hard error: an evaluator server must never silently serve random weights.
+    load_evidence = _TeeStdout(sys.stdout)
+    with contextlib.redirect_stdout(load_evidence):
+        policy = make_policy(cfg=policy_config, ds_meta=dataset_meta)
+    _validate_checkpoint_load_output(load_evidence.getvalue())
+    policy.eval()
+    policy.reset()
+    preprocessor, postprocessor = make_pre_post_processors(
+        policy_cfg=policy.config,
+        pretrained_path=str(pretrained_dir),
+        preprocessor_overrides={
+            "device_processor": {"device": device},
+            "normalizer_processor": {
+                "stats": dataset_meta.stats,
+                "features": {
+                    **policy.config.input_features,
+                    **policy.config.output_features,
+                },
+                "norm_map": policy.config.normalization_mapping,
+            },
+        },
+        postprocessor_overrides={
+            "unnormalizer_processor": {
+                "stats": dataset_meta.stats,
+                "features": policy.config.output_features,
+                "norm_map": policy.config.normalization_mapping,
+            },
+            "device_processor": {"device": "cpu"},
+        },
+    )
+    return Pi05InferenceRuntime(
+        policy=policy,
+        preprocessor=preprocessor,
+        postprocessor=postprocessor,
+        torch_module=torch,
+        pretrained_dir=pretrained_dir,
+    )
+
+
+def load_pi05_runtime(
+    *,
+    view_dir: Path,
+    stats_path: Path | None,
+    checkpoint: Path,
+    device: str,
+) -> tuple[Pi05InferenceRuntime, Any]:
+    """Load a real PI0.5 runtime without materializing dataset frame tables."""
+
+    try:
+        from lerobot.datasets.dataset_metadata import LeRobotDatasetMetadata
+    except ImportError as exc:
+        raise BehaviorLeRobotAdapterError(
+            "PI0.5 serving requires the pinned LeRobot training environment"
+        ) from exc
+
+    view = load_behavior_view(view_dir, stats_path=stats_path)
+    dataset_meta = LeRobotDatasetMetadata(
+        view.source_repo_id,
+        root=view.root,
+        revision=view.source_revision,
+    )
+    adapt_lerobot_metadata(
+        dataset_meta,
+        view_stats=view.stats,
+        video_keys=view.video_keys,
+    )
+    runtime = _make_pi05_runtime(
+        checkpoint=checkpoint,
+        device=device,
+        dataset_meta=dataset_meta,
+    )
+    return runtime, view
+
+
 def run_inference(
     *,
     view_dir: Path,
@@ -59,20 +297,13 @@ def run_inference(
     """Load dataset, checkpoint and processors, then predict one real action chunk."""
 
     try:
-        import torch
         from lerobot.datasets.lerobot_dataset import LeRobotDataset
-        from lerobot.policies import make_policy, make_pre_post_processors
-        from lerobot.policies.pi05.configuration_pi05 import PI05Config
     except ImportError as exc:
         raise BehaviorLeRobotAdapterError(
             "offline inference requires the pinned LeRobot training environment"
         ) from exc
 
-    if device.startswith("cuda") and not torch.cuda.is_available():
-        raise BehaviorLeRobotAdapterError("CUDA inference requested but CUDA is unavailable")
-
     view = load_behavior_view(view_dir, stats_path=stats_path)
-    pretrained_dir = _resolve_pretrained_dir(checkpoint.expanduser().resolve())
     base_dataset = LeRobotDataset(
         view.source_repo_id,
         root=view.root,
@@ -87,74 +318,24 @@ def run_inference(
         video_keys=view.video_keys,
         task_instruction=view.task_instruction,
     )
+    runtime = _make_pi05_runtime(
+        checkpoint=checkpoint,
+        device=device,
+        dataset_meta=dataset.meta,
+    )
     if sample_index < 0 or sample_index >= len(dataset):
         raise BehaviorLeRobotAdapterError(
             f"sample_index={sample_index} is outside [0, {len(dataset)})"
         )
 
-    policy_config = PI05Config.from_pretrained(str(pretrained_dir))
-    policy_config.pretrained_path = pretrained_dir
-    policy_config.device = device
-    # Infer the Behavior 23D + three-RGB feature contract from the adapted
-    # metadata even when the supplied checkpoint is the generic PI0.5 base.
-    policy_config.input_features = {}
-    policy_config.output_features = {}
-    policy = make_policy(cfg=policy_config, ds_meta=dataset.meta)
-    policy.eval()
-    policy.reset()
-    preprocessor, postprocessor = make_pre_post_processors(
-        policy_cfg=policy.config,
-        pretrained_path=str(pretrained_dir),
-        preprocessor_overrides={
-            "device_processor": {"device": device},
-            "normalizer_processor": {
-                "stats": dataset.meta.stats,
-                "features": {
-                    **policy.config.input_features,
-                    **policy.config.output_features,
-                },
-                "norm_map": policy.config.normalization_mapping,
-            },
-        },
-        postprocessor_overrides={
-            "unnormalizer_processor": {
-                "stats": dataset.meta.stats,
-                "features": policy.config.output_features,
-                "norm_map": policy.config.normalization_mapping,
-            },
-            "device_processor": {"device": "cpu"},
-        },
-    )
-
     sample = dict(dataset[sample_index])
-    # Action is a training target, not an inference input.
-    sample.pop(ACTION, None)
-    for key in tuple(sample):
-        if key.endswith("_is_pad"):
-            sample.pop(key)
-    for camera_key in RGB_VIDEO_KEYS:
-        image = sample[camera_key]
-        if image.dtype == torch.uint8:
-            sample[camera_key] = image.to(dtype=torch.float32) / 255.0
-
-    processed = preprocessor(sample)
-    inference_kwargs: dict[str, int] = {}
-    if num_inference_steps is not None:
-        inference_kwargs["num_steps"] = num_inference_steps
 
     started = time.perf_counter()
-    with torch.inference_mode():
-        action_chunk = policy.predict_action_chunk(processed, **inference_kwargs)
-        action_chunk = postprocessor(action_chunk)
+    action_chunk = runtime.predict_action_chunk(
+        sample,
+        num_inference_steps=num_inference_steps,
+    )
     latency_ms = (time.perf_counter() - started) * 1000.0
-
-    if action_chunk.ndim != 3 or action_chunk.shape[-1] != ACTION_DIM:
-        raise BehaviorLeRobotAdapterError(
-            "PI0.5 inference returned an invalid action chunk shape: "
-            f"{tuple(action_chunk.shape)}"
-        )
-    if not bool(torch.isfinite(action_chunk).all()):
-        raise BehaviorLeRobotAdapterError("PI0.5 inference returned non-finite actions")
 
     summary = _tensor_summary(action_chunk)
     if not all(math.isfinite(summary[key]) for key in ("min", "max", "mean")):
@@ -163,7 +344,7 @@ def run_inference(
         "schema_version": "1.0",
         "backend": "lerobot",
         "policy_type": "pi05",
-        "checkpoint": str(pretrained_dir),
+        "checkpoint": str(runtime.pretrained_dir),
         "view_dir": str(view_dir.resolve()),
         "view_stats": str(view.stats_path),
         "dataset_root": str(view.root),

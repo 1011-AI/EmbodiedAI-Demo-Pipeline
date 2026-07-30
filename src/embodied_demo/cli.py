@@ -125,6 +125,29 @@ def _command_behavior1k_prepare_view(args: argparse.Namespace) -> int:
     return 0
 
 
+def _command_behavior1k_materialize_view(args: argparse.Namespace) -> int:
+    from embodied_demo.behavior1k.materialize import materialize_behavior_view
+
+    result = materialize_behavior_view(
+        view_dir=args.view_dir,
+        output_root=args.output_root,
+        mode=args.mode,
+        source_root_override=args.source_root,
+    )
+    projection = result["projection"]
+    inventory = result["inventory"]
+    print(
+        "BEHAVIOR1K_MATERIALIZED "
+        f"mode={projection['mode']} episodes={projection['episode_count']} "
+        f"files={inventory['materialized_file_count']} "
+        f"bytes={inventory['materialized_bytes']} "
+        f"inode_reuse={inventory['inode_reuse_file_count']}"
+    )
+    print(f"ROOT {projection['output_root']}")
+    print(f"MANIFEST {Path(projection['output_root']) / 'materialization_manifest.json'}")
+    return 0
+
+
 def _command_behavior1k_contract_smoke(args: argparse.Namespace) -> int:
     from embodied_demo.behavior1k.protocol import BehaviorPolicySession, packb, unpackb
 
@@ -239,6 +262,32 @@ def build_parser() -> argparse.ArgumentParser:
         default=Path("data/behavior1k/views/r1pro_policy23/turning_on_radio"),
     )
     behavior_view.set_defaults(handler=_command_behavior1k_prepare_view)
+
+    behavior_materialize = subparsers.add_parser(
+        "behavior1k-materialize-view",
+        help="materialize one task view into a GPU-visible LeRobot v3 root",
+    )
+    behavior_materialize.add_argument(
+        "--view-dir",
+        type=Path,
+        default=Path("data/behavior1k/views/r1pro_policy23/turning_on_radio"),
+    )
+    behavior_materialize.add_argument(
+        "--output-root",
+        type=Path,
+        default=Path("data/behavior1k/materialized/turning_on_radio"),
+    )
+    behavior_materialize.add_argument(
+        "--mode",
+        choices=["hardlink", "copy"],
+        default="hardlink",
+    )
+    behavior_materialize.add_argument(
+        "--source-root",
+        type=Path,
+        help="optional management-node source-root remap; episode/file paths still come from the view",
+    )
+    behavior_materialize.set_defaults(handler=_command_behavior1k_materialize_view)
 
     behavior_contract = subparsers.add_parser(
         "behavior1k-contract-smoke",

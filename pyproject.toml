@@ -23,7 +23,7 @@ behavior1k = [
   "msgpack>=1,<2",
   "numpy>=2.0,<2.3",
   "pyarrow>=18,<26",
-  "websockets>=13,<16",
+  "websockets>=13,<17",
 ]
 
 [project.scripts]

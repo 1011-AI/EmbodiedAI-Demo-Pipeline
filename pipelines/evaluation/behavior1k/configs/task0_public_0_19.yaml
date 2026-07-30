@@ -1,0 +1,32 @@
+extends: base.yaml
+
+evaluation:
+  # BEHAVIOR-1K v3.9.1 public_test split 的完整 20 个 index。
+  instance_indices:
+    - 0
+    - 1
+    - 2
+    - 3
+    - 4
+    - 5
+    - 6
+    - 7
+    - 8
+    - 9
+    - 10
+    - 11
+    - 12
+    - 13
+    - 14
+    - 15
+    - 16
+    - 17
+    - 18
+    - 19
+  num_rollouts: 1
+  max_steps: null
+  write_video: true
+
+output:
+  directory: runs/experiments/evaluation/behavior1k/turning_on_radio_public_0_19
+  resume: true

@@ -294,6 +294,7 @@ class BehaviorPolicySession:
 
     def _reset(self) -> None:
         self.action_buffer.reset()
+        self._previous_total_ms = None
         if hasattr(self.policy, "reset"):
             self.policy.reset()
 
