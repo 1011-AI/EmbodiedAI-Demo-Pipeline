@@ -1,0 +1,69 @@
+from __future__ import annotations
+
+import importlib.util
+from pathlib import Path
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+EXPERIMENT_DIR = (
+    PROJECT_ROOT / "experiments/lerobot/pi05_behavior1k_task0"
+)
+
+
+def _load_runner():
+    spec = importlib.util.spec_from_file_location(
+        "pi05_behavior1k_task0_run",
+        EXPERIMENT_DIR / "run.py",
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_train_command_uses_real_behavior_adapter_and_yaml_values(tmp_path: Path) -> None:
+    runner = _load_runner()
+    config = runner.load_config(EXPERIMENT_DIR / "config.yaml")
+    command = runner.build_train_command(
+        config,
+        project_root=PROJECT_ROOT,
+        run_dir=tmp_path / "run",
+        num_processes_override=2,
+    )
+
+    assert "accelerate.commands.accelerate_cli" in command
+    assert "--num_processes" in command
+    assert command[command.index("--num_processes") + 1] == "2"
+    assert "--module" in command
+    assert (
+        command[command.index("--module") + 1]
+        == "pipelines.lerobot.behavior1k.train"
+    )
+    assert "--policy.type=pi05" in command
+    assert "--policy.use_relative_actions=false" in command
+    assert "--dataset.use_imagenet_stats=false" in command
+    assert "--steps=2" in command
+    assert "--save_checkpoint=true" in command
+
+
+def test_infer_command_uses_real_checkpoint_inference_module(tmp_path: Path) -> None:
+    runner = _load_runner()
+    config = runner.load_config(EXPERIMENT_DIR / "config.yaml")
+    command = runner.build_infer_command(
+        config,
+        project_root=PROJECT_ROOT,
+        run_dir=tmp_path / "run",
+        checkpoint_override="models/lerobot/pi05/behavior-checkpoint",
+    )
+
+    assert command[:3] == [
+        runner.sys.executable,
+        "-m",
+        "pipelines.lerobot.behavior1k.infer",
+    ]
+    assert any(
+        value.endswith("models/lerobot/pi05/behavior-checkpoint")
+        for value in command
+        if value.startswith("--checkpoint=")
+    )
+    assert "--num-inference-steps=10" in command

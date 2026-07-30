@@ -1,0 +1,122 @@
+# Behavior-1K 2026 / Task 0 / FastWAM 真实后训练入口。
+#
+# 常用命令：
+#   python experiments/custom/fastwam_behavior1k_task0/run.py --dry-run
+#   python experiments/custom/fastwam_behavior1k_task0/run.py --prepare-only
+#   python experiments/custom/fastwam_behavior1k_task0/run.py --dataset-smoke
+#   python experiments/custom/fastwam_behavior1k_task0/run.py
+#
+# 最后一条命令默认执行 smoke：真实加载 release checkpoint、一个 batch、一次反向更新、
+# checkpoint 落盘。要跑短训，把 fastwam.mode 改为 pilot；不要手写一串 Hydra 参数。
+
+backend: fastwam
+base_config: configs/fastwam/realrobot_train_eval.sh
+
+experiment:
+  name: fastwam_behavior1k_task0
+  route: custom
+  run_name: fastwam_behavior1k_task0
+  # 留空时自动生成。多节点才需要让所有节点显式使用同一个 run_id。
+  run_id:
+
+environment:
+  # 这里只做环境提醒，不会创建或激活环境。
+  conda_env: fastwam
+
+paths:
+  run_root: runs/experiments/custom
+  fastwam_workdir: upstreams/FastWAM-realrobot
+  model_base: models
+  cache_root: upstreams
+  cache_paths:
+    torch_extensions: .cache/torch_extensions/fastwam
+    triton: .cache/triton/fastwam
+    xdg: .cache
+
+behavior1k:
+  # 公共配置不写死集群绝对路径。启动前设置：
+  #   export BEHAVIOR1K_DATA_ROOT=/mnt/.../2026-challenge-demos
+  dataset_root_env: BEHAVIOR1K_DATA_ROOT
+
+  # Task 0 是 turning_on_radio。run.py 会从 meta/episodes Parquet 实际发现 episode，
+  # 不依赖“恰好是 0..199”这一未经验证的假设。
+  task_index: 0
+  task_name: turning_on_radio
+  expected_episodes: 200
+
+  # FastWAM 使用自己的 23D z-score stats，不能直接复用 release 的 7D/8D stats，
+  # 也不能直接使用原始 61D state stats。文件不存在时，非 dry-run 会按 Task 0
+  # 的实际 data shard 流式计算一次，之后所有实验复用。
+  norm_stats_path: data/custom/fastwam/behavior1k/task0000_norm_stats.json
+
+  # FastWAM dataloader 读取预计算 T5 context。训练 wrapper 会按 text_embeddings
+  # 配置调用上游真实 precompute_text_embeds.py，不在线伪造 embedding。
+  text_embedding_cache_dir: data/custom/fastwam/behavior1k/text_embeds/task0000
+
+distributed:
+  # 第一阶段先跑单机八卡；多机继续走现有 FastWAM launcher 的节点参数。
+  nnodes: 1
+  node_rank: 0
+  gpus_per_node: 8
+  master_addr: 127.0.0.1
+  master_port: 29500
+
+fastwam:
+  # smoke=1 step；pilot=20 step；full=按 epoch。当前默认一个真实训练 step。
+  mode: smoke
+  recipe: joint_base
+  task_name: behavior1k_task0_action_only
+
+  model_id: Wan-AI/Wan2.2-TI2V-5B
+  tokenizer_model_id: Wan-AI/Wan2.1-T2V-1.3B
+  redirect_common_files: false
+  video_backend: pyav
+  suppress_video_warnings: true
+
+  # release 路线会加载 7D LIBERO FastWAM 权重。23D 不匹配的三个 action
+  # input/output tensor 和 8D->23D proprio weight 会按 overlay 的真实
+  # shape-compatible loader 跳过并重新训练；共享 video/action backbone 会加载。
+  # 真实 FastWAM.load_checkpoint 调用会由 rank 0 在本次 run_dir 写出
+  # model_load_report.json，逐项记录 loaded / shape_mismatch / reinitialized。
+  init: release
+  require_cuda: true
+  mixed_precision: bf16
+  wandb: false
+
+  text_embeddings:
+    precompute: auto
+    gpus: 1
+    overwrite: false
+    wait_timeout: 3600
+    master_addr: 127.0.0.1
+    master_port: 29517
+
+  # 这些覆盖进入上游真实 Hydra 训练；不是本项目里的 CPU/toy 实现。
+  extra_overrides:
+    - train_action_expert_only=true
+    - model.loss.lambda_video=0.0
+    - model.loss.lambda_action=1.0
+    - learning_rate=2e-5
+    - keep_last_n_checkpoints=3
+
+mode:
+  smoke:
+    # 真实 one-batch/one-update 检查，会加载 5B 模型并需要 CUDA。
+    max_steps: 1
+    batch_size: 1
+    num_workers: 0
+    save_every: 1
+
+  pilot:
+    # 短训看 loss 与吞吐；确认 smoke 后再把 fastwam.mode 改为 pilot。
+    max_steps: 20
+    batch_size: 1
+    num_workers: 4
+    save_every: 20
+
+  full:
+    # 长实验的保守起点，显存和解码吞吐实测后再增大 batch/worker。
+    batch_size: 1
+    num_workers: 8
+    num_epochs: 5
+    save_every: 500

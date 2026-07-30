@@ -7,6 +7,7 @@
 | 文档 | 用途 |
 |---|---|
 | [`../README.md`](../README.md) | 项目现在是什么，怎么快速跑 |
+| [`BEHAVIOR1K_2026.md`](BEHAVIOR1K_2026.md) | 2026 Challenge 数据、π0.5/FastWAM 后训练与闭环评测主入口 |
 | [`BOOTSTRAP.md`](BOOTSTRAP.md) | 从新 checkout 到可用工作区：目录、环境、数据、模型、cache |
 | [`TRAINING_AND_INFERENCE.md`](TRAINING_AND_INFERENCE.md) | 训练、推理、下载、结果路径和排障的唯一主入口 |
 | [`DISTRIBUTED_TRAINING.md`](DISTRIBUTED_TRAINING.md) | LeRobot/pi05 与 FastWAM 的 SSH 多机启动、profile 和测速顺序 |
@@ -28,12 +29,11 @@
 
 ## 当前最重要的事实
 
-- 当前训练/推理命令以 [`TRAINING_AND_INFERENCE.md`](TRAINING_AND_INFERENCE.md) 为准；
-- 多机/多节点启动以 [`DISTRIBUTED_TRAINING.md`](DISTRIBUTED_TRAINING.md) 为准；
+- 当前开发主线和验收顺序以 [`BEHAVIOR1K_2026.md`](BEHAVIOR1K_2026.md) 为准；
+- 通用训练/推理约定以 [`TRAINING_AND_INFERENCE.md`](TRAINING_AND_INFERENCE.md) 为准；
 - 日常启动遵循“实验目录自包含”约定：优先使用 `experiments/<route>/<experiment>/config.yaml + run.py`；
-- 已在 SCUT `gpu11` 跑通 LeRobot ACT/PushT 真实 GPU training smoke，并观察到 2-step loss 下降；
-- 已在 SCUT `gpu11` 跑通 LeRobot FastWAM/LIBERO CUDA inference smoke，输出 action evidence；
-- LeRobot 数据、policy、FastWAM v3 转换和 Wan/T5 base cache 均已项目内落盘；
-- Custom FastWAM 真实训练入口是 `experiments/custom/fastwam_realrobot_single8_random/config.yaml + run.py`；
-- ImageWAM 已加入 Custom WAM 结构，默认目标是 FLUX.2 4B + LIBERO；
+- BEHAVIOR-1K 2026 原始数据保持只读，两条模型路线共用零拷贝任务视图和 R1Pro 23D policy contract；
+- LeRobot π0.5 与 custom FastWAM 必须分别完成短训、checkpoint 重载、离线推理后，才进入同一套闭环 evaluator；
+- 旧集群实验只代表历史证据，不再作为当前环境或当前启动命令；
+- 多机训练等单机 Task 0 验收后再启用，不阻塞当前数据、训练和推理链路；
 - `data/`、`models/`、`hf_cache/`、`runs/`、`upstreams/` 都是 ignored 本地/集群目录，不进 Git。

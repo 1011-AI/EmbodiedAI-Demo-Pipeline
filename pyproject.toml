@@ -18,6 +18,13 @@ dependencies = [
 dev = [
   "pytest>=8,<9",
 ]
+behavior1k = [
+  "av>=15,<16",
+  "msgpack>=1,<2",
+  "numpy>=2.0,<2.3",
+  "pyarrow>=18,<26",
+  "websockets>=13,<16",
+]
 
 [project.scripts]
 embodied-demo = "embodied_demo.cli:main"
