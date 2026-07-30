@@ -224,6 +224,11 @@ python experiments/lerobot/pi05_behavior1k_task0/run.py \
 配置与入口：
 
 ```bash
+# 首次准备固定版本源码/环境时跳过本实验不需要的旧 LIBERO 资产。
+FASTWAM_PREPARE_LIBERO_DATA=0 \
+  FASTWAM_SOURCE_MODE=sync \
+  bash scripts/fastwam/prepare_fastwam_overlay.sh
+
 # 生成 23D stats、安装固定版本 overlay 配置。
 python experiments/custom/fastwam_behavior1k_task0/run.py --prepare-only
 

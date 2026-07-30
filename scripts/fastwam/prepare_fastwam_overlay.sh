@@ -43,6 +43,9 @@ FASTWAM_PIP_RETRIES="${FASTWAM_PIP_RETRIES:-20}"
 FASTWAM_PIP_RESUME_RETRIES="${FASTWAM_PIP_RESUME_RETRIES:-50}"
 FASTWAM_CUSTOM_LIBERO_DATA="${FASTWAM_CUSTOM_LIBERO_DATA:-$EMBODIED_REPO_ROOT/data/custom/fastwam/libero-fastwam}"
 FASTWAM_EXTRACT_CUSTOM_LIBERO_DATA="${FASTWAM_EXTRACT_CUSTOM_LIBERO_DATA:-1}"
+# BEHAVIOR-1K 等非 LIBERO 实验只需要源码/环境，不应被旧 LIBERO 资产阻塞。
+# 设为 0 时跳过 LIBERO 解压、校验和兼容 symlink；默认 1 保持原有实验行为。
+FASTWAM_PREPARE_LIBERO_DATA="${FASTWAM_PREPARE_LIBERO_DATA:-1}"
 FASTWAM_SKIP_TORCH_INSTALL="${FASTWAM_SKIP_TORCH_INSTALL:-0}"
 FASTWAM_SKIP_PIP_BOOTSTRAP="${FASTWAM_SKIP_PIP_BOOTSTRAP:-0}"
 FASTWAM_ALLOW_PYTHON_MINOR_MISMATCH="${FASTWAM_ALLOW_PYTHON_MINOR_MISMATCH:-0}"
@@ -318,17 +321,21 @@ esac
 
 patch_fastwam_video_backend_default
 
-prepare_custom_libero_data
-mkdir -p "$FASTWAM_WORKDIR/data"
-FASTWAM_LIBERO_LINK_TARGET="$FASTWAM_CUSTOM_LIBERO_DATA"
-if [[ "$FASTWAM_CUSTOM_LIBERO_DATA" == "$EMBODIED_REPO_ROOT"/data/custom/fastwam/libero-fastwam ]]; then
-  # Keep the symlink relative to the runnable FastWAM tree.  On multi-node
-  # clusters the same project may be mounted with different absolute prefixes
-  # on each node; an absolute symlink from node0 can be broken on node1.
-  FASTWAM_LIBERO_LINK_TARGET="../../../data/custom/fastwam/libero-fastwam"
+if [[ "$FASTWAM_PREPARE_LIBERO_DATA" == "1" ]]; then
+  prepare_custom_libero_data
+  mkdir -p "$FASTWAM_WORKDIR/data"
+  FASTWAM_LIBERO_LINK_TARGET="$FASTWAM_CUSTOM_LIBERO_DATA"
+  if [[ "$FASTWAM_CUSTOM_LIBERO_DATA" == "$EMBODIED_REPO_ROOT"/data/custom/fastwam/libero-fastwam ]]; then
+    # Keep the symlink relative to the runnable FastWAM tree.  On multi-node
+    # clusters the same project may be mounted with different absolute prefixes
+    # on each node; an absolute symlink from node0 can be broken on node1.
+    FASTWAM_LIBERO_LINK_TARGET="../../../data/custom/fastwam/libero-fastwam"
+  fi
+  ln -sfn "$FASTWAM_LIBERO_LINK_TARGET" "$FASTWAM_WORKDIR/data/libero_mujoco3.3.2"
+  echo "FastWAM LIBERO data linked: $FASTWAM_WORKDIR/data/libero_mujoco3.3.2 -> $FASTWAM_LIBERO_LINK_TARGET"
+else
+  echo "FASTWAM_PREPARE_LIBERO_DATA=0, skipped legacy LIBERO extraction and symlink."
 fi
-ln -sfn "$FASTWAM_LIBERO_LINK_TARGET" "$FASTWAM_WORKDIR/data/libero_mujoco3.3.2"
-echo "FastWAM LIBERO data linked: $FASTWAM_WORKDIR/data/libero_mujoco3.3.2 -> $FASTWAM_LIBERO_LINK_TARGET"
 
 if [[ "$FASTWAM_INSTALL" != "1" ]]; then
   if [[ "$FASTWAM_SOURCE_MODE" == "sync" ]]; then
