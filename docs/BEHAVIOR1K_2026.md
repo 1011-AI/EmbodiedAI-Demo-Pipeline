@@ -463,6 +463,10 @@ python experiments/custom/fastwam_behavior1k_task0/run.py --dry-run
 python experiments/custom/fastwam_behavior1k_task0/run.py
 ```
 
+目标镜像若提供系统 Torch/CUDA、其余依赖位于项目 `.venv_fastwam`，YAML 中的
+`paths.python_overlay` 会自动解析对应 `site-packages`；训练和推理均不需要手写
+`PYTHONPATH`。完整 conda/venv 环境可不创建该目录。
+
 已验证的真实 dataset smoke 输出为：
 
 ```text

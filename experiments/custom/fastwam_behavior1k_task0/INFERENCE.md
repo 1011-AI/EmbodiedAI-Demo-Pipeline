@@ -59,6 +59,11 @@ python experiments/custom/fastwam_behavior1k_task0/infer.py
 但不能直接作为 trainer 的单一 `resume` 继续训练。续训需要实现 base->delta
 双预载，或在大内存环境保存 full state。
 
+若节点镜像已经提供兼容的 Torch/CUDA，而 FastWAM 的非 Torch 依赖安装在项目
+`.venv_fastwam` 中，`paths.python_overlay` 会自动发现对应的 `site-packages` 并加入
+运行路径。训练和推理命令都不需要手写 `PYTHONPATH`。若当前 conda/venv 本身已完整安装
+依赖，项目内 overlay 可以不存在；需要换位置时设置 `FASTWAM_PYTHON_OVERLAY`。
+
 ## 已验证结果（2026-07-30）
 
 真实 Task 0 action-only smoke 完成 1 个训练 step，记录 loss `0.8314`。这只验证前向、

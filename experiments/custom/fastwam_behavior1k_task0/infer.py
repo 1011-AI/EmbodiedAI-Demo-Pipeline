@@ -50,6 +50,32 @@ def _load_yaml(path: Path) -> dict[str, Any]:
     return payload
 
 
+def _resolve_python_overlay_site(
+    project_root: Path,
+    value: str | Path | None,
+) -> Path | None:
+    if value is None or not str(value).strip():
+        return None
+    root = _path(project_root, value)
+    if not root.exists():
+        return None
+    if root.name == "site-packages" and root.is_dir():
+        return root
+    exact = (
+        root
+        / f"lib/python{sys.version_info.major}.{sys.version_info.minor}/site-packages"
+    )
+    if exact.is_dir():
+        return exact.resolve()
+    candidates = sorted(root.glob("lib/python*/site-packages"))
+    if len(candidates) == 1:
+        return candidates[0].resolve()
+    raise SystemExit(
+        "ERROR: paths.python_overlay must be a site-packages directory or a "
+        f"venv with exactly one Python site-packages directory: {root}"
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Run real FastWAM/BEHAVIOR-1K checkpoint inference from YAML.",
@@ -124,6 +150,24 @@ def main(argv: list[str] | None = None) -> int:
 
     native_path = _path(project_root, native_value)
     source_path = _path(project_root, source_value)
+    python_overlay_value = _configured_value(
+        path_cfg,
+        key="python_overlay",
+        env_key="python_overlay_env",
+        required=False,
+    )
+    python_overlay_site = _resolve_python_overlay_site(
+        project_root,
+        python_overlay_value,
+    )
+    if python_overlay_site is not None:
+        overlay_text = str(python_overlay_site)
+        if overlay_text not in sys.path:
+            sys.path.insert(0, overlay_text)
+        previous_pythonpath = os.environ.get("PYTHONPATH", "")
+        os.environ["PYTHONPATH"] = os.pathsep.join(
+            part for part in (overlay_text, previous_pythonpath) if part
+        )
     model_base_path = _path(
         project_root,
         str(path_cfg.get("model_base") or "models"),
@@ -177,6 +221,9 @@ def main(argv: list[str] | None = None) -> int:
         "output_dir": str(output_dir),
         "diffsynth_model_base_path": os.environ["DIFFSYNTH_MODEL_BASE_PATH"],
         "diffsynth_skip_download": os.environ["DIFFSYNTH_SKIP_DOWNLOAD"],
+        "python_overlay_site_packages": (
+            str(python_overlay_site) if python_overlay_site is not None else None
+        ),
         "sample_index": sample_index,
         "device": str(inference_cfg.get("device", "cuda:0")),
         "require_cuda": bool(inference_cfg.get("require_cuda", True)),

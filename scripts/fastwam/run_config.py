@@ -60,6 +60,33 @@ def project_path(project_root: Path, value: Any, default: str) -> str:
     return str(path)
 
 
+def resolve_python_overlay_site(project_root: Path, value: Any) -> str | None:
+    """Resolve an optional venv-style dependency overlay without activating it."""
+
+    raw = optional(value)
+    if raw is None:
+        return None
+    root = Path(raw).expanduser()
+    if not root.is_absolute():
+        root = project_root / root
+    root = root.resolve()
+    if not root.exists():
+        # A complete conda/venv does not need the optional system-Torch overlay.
+        return None
+    if root.name == "site-packages" and root.is_dir():
+        return str(root)
+    exact = root / f"lib/python{sys.version_info.major}.{sys.version_info.minor}/site-packages"
+    if exact.is_dir():
+        return str(exact)
+    candidates = sorted(root.glob("lib/python*/site-packages"))
+    if len(candidates) == 1:
+        return str(candidates[0].resolve())
+    raise SystemExit(
+        "ERROR: paths.python_overlay must be a site-packages directory or a "
+        f"venv with exactly one Python site-packages directory: {root}"
+    )
+
+
 def env_override(name: str, value: Any) -> str:
     override = os.environ.get(name)
     if override is not None and override != "":
@@ -197,6 +224,15 @@ def build_env(config: dict[str, Any], project_root: Path, config_path: Path) -> 
             bool_text(fastwam.get("low_memory_checkpoint", False)),
         ),
     }
+    overlay_site = resolve_python_overlay_site(
+        project_root,
+        env_override(
+            "FASTWAM_PYTHON_OVERLAY",
+            paths.get("python_overlay") or "",
+        ),
+    )
+    if overlay_site is not None:
+        env["FASTWAM_PYTHON_OVERLAY_SITE"] = overlay_site
     require_action_only_for_delta(env)
 
     # Model assets and the text embedding cache are part of the real FastWAM

@@ -42,6 +42,11 @@ paths:
   # 设置 DIFFSYNTH_MODEL_BASE_PATH，并强制 DIFFSYNTH_SKIP_DOWNLOAD=true。
   model_base: models
 
+  # 可选系统 Torch + 项目依赖 overlay。入口会自动发现其中与当前 Python
+  # 对应的 site-packages，不需要手写 PYTHONPATH；完整环境中目录可不存在。
+  python_overlay: .venv_fastwam
+  python_overlay_env: FASTWAM_PYTHON_OVERLAY
+
   # 推理证据、checkpoint load report 都写到这里；不会写入原数据集。
   output_dir: runs/experiments/custom/fastwam_behavior1k_task0/inference
 

@@ -479,6 +479,12 @@ def test_fastwam_inference_yaml_dry_run_checks_real_artifact_layout(
     native = _native_run(tmp_path)
     (native / "checkpoints/weights/step_000007.pt").touch()
     source = _source_root(tmp_path)
+    overlay_site = (
+        tmp_path
+        / ".venv_fastwam"
+        / f"lib/python{sys.version_info.major}.{sys.version_info.minor}/site-packages"
+    )
+    overlay_site.mkdir(parents=True)
     config = tmp_path / "inference.yaml"
     config.write_text(
         "\n".join(
@@ -496,6 +502,8 @@ def test_fastwam_inference_yaml_dry_run_checks_real_artifact_layout(
                 "  base_checkpoint_env: TEST_FASTWAM_BASE_CHECKPOINT",
                 f"  source_root: {source}",
                 "  source_root_env: TEST_FASTWAM_SOURCE_ROOT",
+                f"  python_overlay: {tmp_path / '.venv_fastwam'}",
+                "  python_overlay_env: TEST_FASTWAM_PYTHON_OVERLAY",
                 f"  output_dir: {tmp_path / 'output'}",
                 "inference:",
                 "  mode: offline",
@@ -537,6 +545,7 @@ def test_fastwam_inference_yaml_dry_run_checks_real_artifact_layout(
                 "TEST_FASTWAM_CHECKPOINT",
                 "TEST_FASTWAM_BASE_CHECKPOINT",
                 "TEST_FASTWAM_SOURCE_ROOT",
+                "TEST_FASTWAM_PYTHON_OVERLAY",
             }
         },
         check=True,
@@ -552,6 +561,7 @@ def test_fastwam_inference_yaml_dry_run_checks_real_artifact_layout(
     expected_model_base = ROOT / "models"
     assert f'"diffsynth_model_base_path": "{expected_model_base}"' in result.stdout
     assert '"diffsynth_skip_download": "true"' in result.stdout
+    assert f'"python_overlay_site_packages": "{overlay_site}"' in result.stdout
     assert (
         "\"task_instruction\": \"Turn on the radio receiver that's on the "
         "table in the living room.\"" in result.stdout

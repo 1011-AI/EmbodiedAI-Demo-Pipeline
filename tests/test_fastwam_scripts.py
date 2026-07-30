@@ -3,11 +3,12 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import sys
 
 import pytest
 
 from scripts.fastwam.parse_train_log import write_summary
-from scripts.fastwam.run_config import build_env
+from scripts.fastwam.run_config import build_env, resolve_python_overlay_site
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -212,6 +213,22 @@ def test_fastwam_low_memory_checkpoint_requires_action_only_override(
             ROOT,
             ROOT / "experiments/custom/unsafe_delta/config.yaml",
         )
+
+
+def test_fastwam_python_overlay_resolves_current_or_single_site_packages(
+    tmp_path: Path,
+) -> None:
+    exact = (
+        tmp_path
+        / ".venv_fastwam"
+        / f"lib/python{sys.version_info.major}.{sys.version_info.minor}/site-packages"
+    )
+    exact.mkdir(parents=True)
+
+    assert resolve_python_overlay_site(tmp_path, ".venv_fastwam") == str(
+        exact.resolve()
+    )
+    assert resolve_python_overlay_site(tmp_path, ".missing") is None
 
 
 def test_fastwam_release_download_script_tracks_public_artifacts() -> None:
