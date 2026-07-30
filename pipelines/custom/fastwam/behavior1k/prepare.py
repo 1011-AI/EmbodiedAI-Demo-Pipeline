@@ -96,6 +96,7 @@ def validate_dataset_metadata(
 class TaskEpisodeSelection:
     task_index: int
     task_name: str
+    task_instruction: str
     episode_indices: tuple[int, ...]
     data_shards: tuple[str, ...]
 
@@ -167,9 +168,15 @@ def discover_task_selection(
     episode_indices.sort()
     if len(episode_indices) != len(set(episode_indices)):
         raise FastWAMBehaviorContractError("episode metadata contains duplicates")
+    task_instruction = str(metadata["task"].get("task") or "").strip()
+    if not task_instruction:
+        raise FastWAMBehaviorContractError(
+            f"task_index={task_index} has an empty natural-language instruction"
+        )
     return TaskEpisodeSelection(
         task_index=int(task_index),
         task_name=expected_task_name,
+        task_instruction=task_instruction,
         episode_indices=tuple(episode_indices),
         data_shards=tuple(sorted(shards)),
     )
@@ -280,6 +287,7 @@ def compute_task_norm_stats(
             "dataset_root": str(root),
             "task_index": selection.task_index,
             "task_name": selection.task_name,
+            "task_instruction": selection.task_instruction,
             "data_shards": list(selection.data_shards),
             "state_projection": "R1Pro observation.state 61D -> policy proprio 23D",
             "action_semantics": "raw mixed 23D; no global delta transform",
@@ -315,6 +323,7 @@ def install_task0_configs(
     fastwam_source_root: str | Path,
     dataset_root: str | Path,
     episode_indices: list[int] | tuple[int, ...],
+    task_instruction: str,
     norm_stats_path: str | Path,
     text_embedding_cache_dir: str | Path,
 ) -> FastWAMBehaviorInstall:
@@ -338,6 +347,11 @@ def install_task0_configs(
         val_set_proportion=0.0,
     )
     data_payload = {"train": train_config, "val": None}
+    normalized_instruction = str(task_instruction).strip()
+    if not normalized_instruction:
+        raise FastWAMBehaviorContractError(
+            "FastWAM Task 0 natural-language instruction must not be empty"
+        )
     task_payload = {
         "defaults": [
             {"override /data": FASTWAM_DATA_CONFIG_NAME},
@@ -346,6 +360,11 @@ def install_task0_configs(
         ],
         "batch_size": 1,
         "num_workers": 0,
+        # The source tasks.jsonl contains all 100 challenge tasks even when the
+        # dataset view selects only Task 0.  FastWAM's precompute script honors
+        # this root override and therefore encodes exactly the selected prompt
+        # instead of loading UMT5 to generate 99 unused cache entries.
+        "override_instruction": normalized_instruction,
         "model": {
             "mot_checkpoint_mixed_attn": True,
             "load_text_encoder": False,

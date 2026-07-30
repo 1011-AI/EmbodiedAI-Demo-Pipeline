@@ -161,6 +161,7 @@ def test_real_v3_episode_structure_uses_flattened_refs_and_unique_shards(
     assert list(metadata) == [0, 1, 2]
     assert metadata[1]["data/file_index"] == 0
     assert selection.episode_indices == (0, 2)
+    assert selection.task_instruction == "Turn on the radio."
     assert selection.data_shards == ("data/chunk-000/file-000.parquet",)
     assert v3_data_file_path(
         json.loads((tmp_path / "meta/info.json").read_text()),

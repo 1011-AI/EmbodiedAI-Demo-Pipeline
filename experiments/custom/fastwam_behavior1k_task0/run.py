@@ -89,6 +89,7 @@ def _verify_hydra_training_contract(
     project_root: Path,
     source_root: Path,
     task_name: str,
+    task_instruction: str,
     expected_episodes: int,
     extra_overrides: list[str],
 ) -> None:
@@ -116,6 +117,7 @@ checks = {
     "action_dim": int(cfg.model.action_dit_config.action_dim),
     "proprio_dim": int(cfg.model.proprio_dim),
     "episodes": len(cfg.data.train.episode_indices),
+    "override_instruction": str(cfg.override_instruction),
     "resume": str(cfg.resume),
 }
 expected = {
@@ -125,6 +127,7 @@ expected = {
     "action_dim": 23,
     "proprio_dim": 23,
     "episodes": expected_episodes,
+    "override_instruction": os.environ["FASTWAM_BEHAVIOR_TASK_INSTRUCTION"],
     "resume": os.environ["FASTWAM_RELEASE_CKPT"],
 }
 if checks != expected:
@@ -137,6 +140,7 @@ print("FASTWAM_BEHAVIOR1K_HYDRA_CONTRACT_OK " + json.dumps(checks, sort_keys=Tru
             "FASTWAM_SOURCE_ROOT": str(source_root),
             "FASTWAM_BEHAVIOR_TASK_CONFIG": task_name,
             "FASTWAM_BEHAVIOR_EXPECTED_EPISODES": str(expected_episodes),
+            "FASTWAM_BEHAVIOR_TASK_INSTRUCTION": task_instruction,
             "FASTWAM_BEHAVIOR_OVERRIDES": json.dumps(extra_overrides),
             "FASTWAM_RELEASE_CKPT": environment.get(
                 "FASTWAM_RELEASE_CKPT",
@@ -208,6 +212,19 @@ def main(argv: list[str] | None = None) -> int:
 
     config_path = here / "config.yaml"
     config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    environment_config = config.get("environment") or {}
+    if not isinstance(environment_config, dict):
+        raise SystemExit("ERROR: environment must be a YAML mapping")
+    if bool(environment_config.get("offline", True)):
+        os.environ.update(
+            {
+                "HF_HUB_OFFLINE": "1",
+                "HF_DATASETS_OFFLINE": "1",
+                "HF_HUB_DISABLE_TELEMETRY": "1",
+                "DO_NOT_TRACK": "1",
+                "DIFFSYNTH_SKIP_DOWNLOAD": "true",
+            }
+        )
     behavior = config["behavior1k"]
     paths = config["paths"]
     root_env = str(behavior["dataset_root_env"])
@@ -252,10 +269,16 @@ def main(argv: list[str] | None = None) -> int:
 
     install = None
     if source_root.is_dir():
+        task_instruction = (
+            selection.task_instruction
+            if selection is not None
+            else "Turn on the radio receiver that's on the table in the living room."
+        )
         install = install_task0_configs(
             fastwam_source_root=source_root,
             dataset_root=dataset_root_for_config,
             episode_indices=episode_indices,
+            task_instruction=task_instruction,
             norm_stats_path=stats_path,
             text_embedding_cache_dir=text_cache,
         )
@@ -267,6 +290,7 @@ def main(argv: list[str] | None = None) -> int:
             project_root=project_root,
             source_root=source_root,
             task_name=FASTWAM_TASK_CONFIG_NAME,
+            task_instruction=task_instruction,
             expected_episodes=len(episode_indices),
             extra_overrides=[
                 str(item)

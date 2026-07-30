@@ -22,6 +22,9 @@ experiment:
 environment:
   # 这里只做环境提醒，不会创建或激活环境。
   conda_env: fastwam
+  # GPU 节点使用项目内完整资产。禁止 datasets / Hub 遥测和下载探测，避免
+  # 本地 Parquet 加载仍等待外网；缺资产时应直接失败并回管理节点准备。
+  offline: true
 
 paths:
   run_root: runs/experiments/custom

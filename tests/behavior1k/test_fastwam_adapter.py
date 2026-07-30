@@ -215,6 +215,11 @@ def _write_fastwam_source_fixture(root: Path) -> None:
                 '        if self.episodes is not None and self.meta._version >= packaging.version.parse("v2.1"):',
                 "            episodes_stats = [self.meta.episodes_stats[ep_idx] for ep_idx in self.episodes]",
                 "            self.stats = aggregate_stats(episodes_stats)",
+                "        # Check timestamps",
+                '        timestamps = torch.stack(self.hf_dataset["timestamp"]).numpy()',
+                '        episode_indices = torch.stack(self.hf_dataset["episode_index"]).numpy()',
+                "        ep_data_index_np = {k: t.numpy() for k, t in self.episode_data_index.items()}",
+                "        # check_timestamps_sync(timestamps, episode_indices, ep_data_index_np, self.fps, self.tolerance_s)",
                 "",
                 "    def load_hf_dataset(self):",
                 "        if self.episodes is None:",
@@ -226,6 +231,18 @@ def _write_fastwam_source_fixture(root: Path) -> None:
                 "",
                 '        # TODO(aliberts): hf_dataset.set_format("torch")',
                 "        return hf_dataset",
+                "",
+                "    def _get_query_timestamps(self, query_indices):",
+                '        query_timestamps[key] = torch.stack(timestamps).tolist()',
+                "",
+                "    def _query_hf_dataset(self, query_indices):",
+                '        return {key: torch.stack(self.hf_dataset.select(q_idx)[key])}',
+                "",
+                "    def _query_hf_dataset_fast(self, query_indices):",
+                "        result[key] = torch.stack(selected_data[key])",
+                "",
+                "    def get_episode_data(self, episode_id):",
+                "        res = {key: torch.stack(selected_data[key]) for key in res_keys}",
                 "",
                 "    def _query_videos(self, query_timestamps, ep_idx):",
                 "        item = {}",
@@ -292,6 +309,13 @@ def test_explicit_lerobot_key_patch_is_source_checked_and_idempotent(tmp_path: P
     assert after.explicit_lerobot_key is True
     assert after.lerobot_v3_shards is True
     assert after.ready_for_behavior1k_config is True
+    loader = (
+        tmp_path
+        / "src/fastwam/datasets/lerobot/lerobot/lerobot_dataset.py"
+    ).read_text(encoding="utf-8")
+    assert "def _stack_hf_column(values):" in loader
+    assert loader.count("_stack_hf_column(") == 5
+    assert "disabled.  Do not" in loader
 
 
 class _FakeTensor:

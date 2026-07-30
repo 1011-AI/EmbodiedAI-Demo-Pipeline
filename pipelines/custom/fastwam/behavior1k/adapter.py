@@ -641,6 +641,102 @@ CODEBASE_VERSION = "v2.1"
 """
     replace_once(import_before, import_after, "v3 helper import")
 
+    # datasets>=4 returns a ``Column`` object for ``dataset[key]`` instead of
+    # the list of Torch tensors returned by the pinned datasets==3.6 stack.
+    # ``torch.stack(Column)`` raises before FastWAM can read even one sample.
+    # Keep the old fast path for list[Tensors] and fall back to ``as_tensor``
+    # for scalar/nested Arrow columns.  Patch every column stack in the pinned
+    # loader so timestamp checks, delta queries and episode reads agree.
+    column_helper_marker = "def _stack_hf_column(values):"
+    legacy_column_helper = """def _stack_hf_column(values):
+    # datasets<=3.6 commonly yields list[Tensor]; datasets>=4 yields Column.
+    try:
+        return torch.stack(values)
+    except TypeError:
+        return torch.as_tensor(values)
+"""
+    slow_column_helper = """def _stack_hf_column(values):
+    # datasets<=3.6 commonly yields list[Tensor]; datasets>=4 yields Column.
+    try:
+        return torch.stack(values)
+    except TypeError:
+        # Converting a large datasets>=4 Column directly with as_tensor walks
+        # Python's sequence protocol one scalar at a time.  Materialize through
+        # NumPy instead; match hf_transform_to_torch by keeping integer dtype
+        # and casting floating columns to Torch's default floating dtype.
+        tensor = torch.from_numpy(np.asarray(values))
+        if tensor.is_floating_point():
+            tensor = tensor.to(dtype=torch.get_default_dtype())
+        return tensor
+"""
+    column_helper = """def _stack_hf_column(values):
+    # datasets<=3.6 commonly yields list[Tensor]; datasets>=4 yields Column.
+    if isinstance(values, (list, tuple)):
+        try:
+            return torch.stack(values)
+        except TypeError:
+            pass
+    # Do not first pass a large datasets>=4 Column to torch.stack/as_tensor:
+    # either path walks Python's sequence protocol one scalar at a time.
+    # Materialize through NumPy, matching hf_transform_to_torch by retaining
+    # integer dtype and casting floating columns to Torch's default dtype.
+    tensor = torch.from_numpy(np.asarray(values))
+    if tensor.is_floating_point():
+        tensor = tensor.to(dtype=torch.get_default_dtype())
+    return tensor
+"""
+    if legacy_column_helper in source:
+        source = source.replace(legacy_column_helper, column_helper, 1)
+        changed = True
+    elif slow_column_helper in source:
+        source = source.replace(slow_column_helper, column_helper, 1)
+        changed = True
+    if column_helper_marker not in source:
+        expected_stack_calls = 6
+        actual_stack_calls = source.count("torch.stack(")
+        if actual_stack_calls != expected_stack_calls:
+            raise FastWAMBehaviorContractError(
+                f"cannot safely patch datasets Column compatibility in {path}: "
+                f"expected {expected_stack_calls} torch.stack calls, "
+                f"found {actual_stack_calls}"
+            )
+        class_marker = "\n\nclass LeRobotDatasetMetadata:"
+        if source.count(class_marker) != 1:
+            raise FastWAMBehaviorContractError(
+                f"cannot safely insert datasets Column helper in {path}: "
+                "class marker drift"
+            )
+        source = source.replace("torch.stack(", "_stack_hf_column(")
+        source = source.replace(
+            class_marker,
+            "\n\n" + column_helper + class_marker,
+            1,
+        )
+        changed = True
+    elif column_helper not in source:
+        raise FastWAMBehaviorContractError(
+            f"cannot safely patch datasets Column helper in {path}: "
+            "unknown existing helper body"
+        )
+
+    unused_timestamp_scan_before = """        # Check timestamps
+        timestamps = _stack_hf_column(self.hf_dataset["timestamp"]).numpy()
+        episode_indices = _stack_hf_column(self.hf_dataset["episode_index"]).numpy()
+        ep_data_index_np = {k: t.numpy() for k, t in self.episode_data_index.items()}
+        # check_timestamps_sync(timestamps, episode_indices, ep_data_index_np, self.fps, self.tolerance_s)
+"""
+    unused_timestamp_scan_after = """        # The pinned loader has timestamp validation disabled.  Do not
+        # materialize every scalar in a datasets>=4 Column merely to create
+        # three unused arrays; shared BEHAVIOR shards contain 429k+ rows even
+        # for one task.  Per-sample timestamp/video bounds remain validated by
+        # the v3 shared-shard helpers below.
+"""
+    replace_once(
+        unused_timestamp_scan_before,
+        unused_timestamp_scan_after,
+        "disabled full-column timestamp scan",
+    )
+
     metadata_before = """    def load_metadata(self):
         self.info = load_info(self.root)
         # TODO add new check
