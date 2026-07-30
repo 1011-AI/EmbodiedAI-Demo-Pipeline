@@ -193,6 +193,7 @@ def main(argv: list[str] | None = None) -> int:
     here = Path(__file__).resolve().parent
     project_root = find_project_root(here)
     sys.path.insert(0, str(project_root))
+    sys.path.insert(0, str(project_root / "src"))
 
     try:
         import yaml
