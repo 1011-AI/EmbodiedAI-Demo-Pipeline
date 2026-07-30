@@ -115,14 +115,25 @@ def main(argv: list[str] | None = None) -> int:
     )
     assert native_value is not None and source_value is not None
 
+    native_path = _path(project_root, native_value)
+    source_path = _path(project_root, source_value)
+    model_base_path = _path(
+        project_root,
+        str(path_cfg.get("model_base") or "models"),
+    )
+    # The GPU node is offline.  Set the same DiffSynth contract used by the
+    # training wrapper before importing or instantiating any upstream model.
+    # The YAML is authoritative so a stale shell variable cannot redirect a
+    # run to another cache or accidentally re-enable network downloads.
+    os.environ["DIFFSYNTH_MODEL_BASE_PATH"] = str(model_base_path)
+    os.environ["DIFFSYNTH_SKIP_DOWNLOAD"] = "true"
+
     from pipelines.custom.fastwam.behavior1k.inference import (
         FastWAMBehaviorPolicy,
         resolve_inference_paths,
         run_offline_inference,
     )
 
-    native_path = _path(project_root, native_value)
-    source_path = _path(project_root, source_value)
     checkpoint_path: str | None = None
     if checkpoint_value is not None:
         raw_checkpoint = Path(checkpoint_value).expanduser()
@@ -156,6 +167,8 @@ def main(argv: list[str] | None = None) -> int:
         "mode": mode,
         "paths": paths.to_dict(),
         "output_dir": str(output_dir),
+        "diffsynth_model_base_path": os.environ["DIFFSYNTH_MODEL_BASE_PATH"],
+        "diffsynth_skip_download": os.environ["DIFFSYNTH_SKIP_DOWNLOAD"],
         "sample_index": sample_index,
         "device": str(inference_cfg.get("device", "cuda:0")),
         "require_cuda": bool(inference_cfg.get("require_cuda", True)),

@@ -330,6 +330,7 @@ class FastWAMSourceCapabilities:
     source_root: str
     explicit_lerobot_key: bool
     episode_selection: bool
+    lerobot_v3_shards: bool
     robotwin_three_camera: bool
     shape_compatible_checkpoint: bool
     checkpoint_load_report: bool
@@ -346,12 +347,20 @@ def inspect_fastwam_source(source_root: str | Path) -> FastWAMSourceCapabilities
     root = Path(source_root).expanduser().resolve()
     base_path = root / "src/fastwam/datasets/lerobot/base_lerobot_dataset.py"
     video_path = root / "src/fastwam/datasets/lerobot/robot_video_dataset.py"
+    loader_path = (
+        root
+        / "src/fastwam/datasets/lerobot/lerobot/lerobot_dataset.py"
+    )
+    v3_compat_path = (
+        root
+        / "src/fastwam/datasets/lerobot/lerobot/behavior1k_v3_shards.py"
+    )
     model_path = root / "src/fastwam/models/wan22/fastwam.py"
     report_path = (
         root / "src/fastwam/utils/behavior1k_checkpoint_report.py"
     )
     trainer_path = root / "src/fastwam/trainer.py"
-    required = (base_path, video_path, model_path, trainer_path)
+    required = (base_path, video_path, loader_path, model_path, trainer_path)
     missing = [str(path) for path in required if not path.is_file()]
     if missing:
         raise FastWAMBehaviorContractError(
@@ -360,6 +369,7 @@ def inspect_fastwam_source(source_root: str | Path) -> FastWAMSourceCapabilities
 
     base_text = base_path.read_text(encoding="utf-8")
     video_text = video_path.read_text(encoding="utf-8")
+    loader_text = loader_path.read_text(encoding="utf-8")
     model_text = model_path.read_text(encoding="utf-8")
     trainer_text = trainer_path.read_text(encoding="utf-8")
     explicit = 'meta.get("lerobot_key")' in base_text
@@ -367,6 +377,15 @@ def inspect_fastwam_source(source_root: str | Path) -> FastWAMSourceCapabilities
         "episode_indices: Optional[List[int]] = None" in base_text
         and "episode_indices: Optional[List[int]] = None" in video_text
         and "episode_indices=episode_indices" in video_text
+    )
+    v3_shards = (
+        v3_compat_path.is_file()
+        and "load_v3_episode_metadata" in loader_text
+        and "filter_v3_hf_dataset" in loader_text
+        and "read_v3_episode_table" in loader_text
+        and "shift_v3_video_timestamps" in loader_text
+        and "v3_data_file_path" in loader_text
+        and "v3_video_file_path" in loader_text
     )
     robotwin = (
         'self.concat_multi_camera == "robotwin"' in video_text
@@ -387,6 +406,7 @@ def inspect_fastwam_source(source_root: str | Path) -> FastWAMSourceCapabilities
         source_root=str(root),
         explicit_lerobot_key=explicit,
         episode_selection=episode_selection,
+        lerobot_v3_shards=v3_shards,
         robotwin_three_camera=robotwin,
         shape_compatible_checkpoint=shape_compatible,
         checkpoint_load_report=checkpoint_report,
@@ -394,6 +414,7 @@ def inspect_fastwam_source(source_root: str | Path) -> FastWAMSourceCapabilities
         ready_for_behavior1k_config=(
             explicit
             and episode_selection
+            and v3_shards
             and robotwin
             and shape_compatible
             and checkpoint_report
@@ -554,6 +575,225 @@ def patch_episode_selection(source_root: str | Path) -> bool:
     if changed:
         base_path.write_text(base, encoding="utf-8")
         video_path.write_text(video, encoding="utf-8")
+    return changed
+
+
+def copy_v3_shard_compat_into_fastwam(source_root: str | Path) -> Path:
+    """Install the standalone LeRobot v3 shared-shard helper."""
+
+    root = Path(source_root).expanduser().resolve()
+    destination = (
+        root
+        / "src/fastwam/datasets/lerobot/lerobot/behavior1k_v3_shards.py"
+    )
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    source = Path(__file__).with_name("v3_shards.py")
+    if not source.is_file():
+        raise FastWAMBehaviorContractError(f"missing v3 shard helper: {source}")
+    payload = source.read_text(encoding="utf-8")
+    if destination.is_file() and destination.read_text(encoding="utf-8") == payload:
+        return destination
+    destination.write_text(payload, encoding="utf-8")
+    return destination
+
+
+def patch_v3_shard_loading(source_root: str | Path) -> bool:
+    """Make the pinned v2.1 loader read v3 metadata and shared shards exactly.
+
+    This patch is intentionally tied to the pinned official + real-robot
+    overlay source.  Every replacement is exact and idempotent, so source drift
+    fails before a 5B model is loaded.
+    """
+
+    root = Path(source_root).expanduser().resolve()
+    path = root / "src/fastwam/datasets/lerobot/lerobot/lerobot_dataset.py"
+    if not path.is_file():
+        raise FastWAMBehaviorContractError(f"missing FastWAM LeRobot loader: {path}")
+    source = path.read_text(encoding="utf-8")
+    changed = False
+
+    def replace_once(before: str, after: str, description: str) -> None:
+        nonlocal source, changed
+        if after in source:
+            return
+        count = source.count(before)
+        if count != 1:
+            raise FastWAMBehaviorContractError(
+                f"cannot safely patch {description} in {path}: "
+                f"expected one source block, found {count}"
+            )
+        source = source.replace(before, after, 1)
+        changed = True
+
+    import_before = 'import traceback\n\nCODEBASE_VERSION = "v2.1"'
+    import_after = """import traceback
+
+from .behavior1k_v3_shards import (
+    filter_v3_hf_dataset,
+    load_v3_episode_metadata,
+    read_v3_episode_table,
+    shift_v3_video_timestamps,
+    v3_data_file_path,
+    v3_video_file_path,
+)
+
+CODEBASE_VERSION = "v2.1"
+"""
+    replace_once(import_before, import_after, "v3 helper import")
+
+    metadata_before = """    def load_metadata(self):
+        self.info = load_info(self.root)
+        # TODO add new check
+        # check_version_compatibility(self.repo_id, self._version, CODEBASE_VERSION)
+        self.tasks, self.task_to_task_index = load_tasks(self.root)
+        if (self.root / "annotations").exists():
+            self.annotations = load_annotations(self.root)
+        self.episodes = load_episodes(self.root)
+        if self._version < packaging.version.parse("v2.1"):
+            self.stats = load_stats(self.root)
+            self.episodes_stats = backward_compatible_episodes_stats(self.stats, self.episodes)
+        else:
+            self.episodes_stats = load_episodes_stats(self.root)
+            self.stats = aggregate_stats(list(self.episodes_stats.values()))
+"""
+    metadata_after = """    def load_metadata(self):
+        self.info = load_info(self.root)
+        # TODO add new check
+        # check_version_compatibility(self.repo_id, self._version, CODEBASE_VERSION)
+        self.tasks, self.task_to_task_index = load_tasks(self.root)
+        if self._version >= packaging.version.parse("v3.0"):
+            # v3 stores flattened episode rows in Parquet and its annotations/
+            # tree is not the legacy annotation JSONL contract.
+            self.episodes = load_v3_episode_metadata(self.root)
+            self.stats = load_stats(self.root)
+            if self.stats is None:
+                raise FileNotFoundError(f"Missing v3 global stats: {self.root / 'meta/stats.json'}")
+            self.episodes_stats = {}
+            return
+        if (self.root / "annotations").exists():
+            self.annotations = load_annotations(self.root)
+        self.episodes = load_episodes(self.root)
+        if self._version < packaging.version.parse("v2.1"):
+            self.stats = load_stats(self.root)
+            self.episodes_stats = backward_compatible_episodes_stats(self.stats, self.episodes)
+        else:
+            self.episodes_stats = load_episodes_stats(self.root)
+            self.stats = aggregate_stats(list(self.episodes_stats.values()))
+"""
+    replace_once(metadata_before, metadata_after, "v3 metadata loading")
+
+    data_path_before = """    def get_data_file_path(self, ep_index: int) -> Path:
+        if ep_index in self.episodes:
+            episode = self.episodes[ep_index]
+            data_chunk = episode.get("data/chunk_index")
+            data_file = episode.get("data/file_index")
+            if data_chunk is not None and data_file is not None:
+                return Path(f"data/chunk-{int(data_chunk):03d}/file-{int(data_file):03d}.parquet")
+        ep_chunk = self.get_episode_chunk(ep_index)
+        fpath = self.data_path.format(episode_chunk=ep_chunk, episode_index=ep_index)
+        return Path(fpath)
+
+    def get_video_file_path(self, ep_index: int, vid_key: str) -> Path:
+        if ep_index in self.episodes:
+            episode = self.episodes[ep_index]
+            video_chunk = episode.get(f"videos/{vid_key}/chunk_index")
+            video_file = episode.get(f"videos/{vid_key}/file_index")
+            if video_chunk is not None and video_file is not None:
+                return Path(f"videos/{vid_key}/chunk-{int(video_chunk):03d}/file-{int(video_file):03d}.mp4")
+        ep_chunk = self.get_episode_chunk(ep_index)
+        fpath = self.video_path.format(episode_chunk=ep_chunk, video_key=vid_key, episode_index=ep_index)
+        return Path(fpath)
+"""
+    data_path_after = """    def get_data_file_path(self, ep_index: int) -> Path:
+        if self._version >= packaging.version.parse("v3.0"):
+            return v3_data_file_path(self.info, self.episodes[ep_index])
+        ep_chunk = self.get_episode_chunk(ep_index)
+        fpath = self.data_path.format(episode_chunk=ep_chunk, episode_index=ep_index)
+        return Path(fpath)
+
+    def get_video_file_path(self, ep_index: int, vid_key: str) -> Path:
+        if self._version >= packaging.version.parse("v3.0"):
+            return v3_video_file_path(self.info, self.episodes[ep_index], vid_key)
+        ep_chunk = self.get_episode_chunk(ep_index)
+        fpath = self.video_path.format(episode_chunk=ep_chunk, video_key=vid_key, episode_index=ep_index)
+        return Path(fpath)
+"""
+    replace_once(data_path_before, data_path_after, "v3 shard path templates")
+
+    selected_stats_before = """        if self.episodes is not None and self.meta._version >= packaging.version.parse("v2.1"):
+            episodes_stats = [self.meta.episodes_stats[ep_idx] for ep_idx in self.episodes]
+            self.stats = aggregate_stats(episodes_stats)
+"""
+    selected_stats_after = """        if self.episodes is not None and self.meta._version >= packaging.version.parse("v2.1"):
+            if self.meta._version >= packaging.version.parse("v3.0"):
+                self.stats = self.meta.stats
+            else:
+                episodes_stats = [self.meta.episodes_stats[ep_idx] for ep_idx in self.episodes]
+                self.stats = aggregate_stats(episodes_stats)
+"""
+    replace_once(selected_stats_before, selected_stats_after, "v3 selected stats")
+
+    dataset_filter_before = """        else:
+            files = sorted({str(self.root / self.meta.get_data_file_path(ep_idx)) for ep_idx in self.episodes})
+            hf_dataset = load_dataset("parquet", data_files=files, split="train")
+
+        # TODO(aliberts): hf_dataset.set_format("torch")
+"""
+    dataset_filter_after = """        else:
+            files = sorted({str(self.root / self.meta.get_data_file_path(ep_idx)) for ep_idx in self.episodes})
+            hf_dataset = load_dataset("parquet", data_files=files, split="train")
+            if self.meta._version >= packaging.version.parse("v3.0"):
+                hf_dataset = filter_v3_hf_dataset(
+                    hf_dataset,
+                    self.episodes,
+                    self.meta.episodes,
+                )
+
+        # TODO(aliberts): hf_dataset.set_format("torch")
+"""
+    replace_once(dataset_filter_before, dataset_filter_after, "v3 row filtering")
+
+    video_before = """        item = {}
+        for vid_key, query_ts in query_timestamps.items():
+            video_path = self.root / self.meta.get_video_file_path(ep_idx, vid_key)
+            frames = decode_video_frames(video_path, query_ts, self.tolerance_s, self.video_backend)
+            item[vid_key] = frames.squeeze(0)
+"""
+    video_after = """        item = {}
+        for vid_key, query_ts in query_timestamps.items():
+            video_path = self.root / self.meta.get_video_file_path(ep_idx, vid_key)
+            if self.meta._version >= packaging.version.parse("v3.0"):
+                query_ts = shift_v3_video_timestamps(
+                    self.meta.episodes[ep_idx],
+                    vid_key,
+                    query_ts,
+                )
+            frames = decode_video_frames(video_path, query_ts, self.tolerance_s, self.video_backend)
+            item[vid_key] = frames.squeeze(0)
+"""
+    replace_once(video_before, video_after, "v3 shared video timestamps")
+
+    episode_table_before = """                file = str(dataset.root / dataset.meta.get_data_file_path(ep_index))
+                table = pq.read_table(str(file))
+
+                result_dict = {}
+"""
+    episode_table_after = """                file = str(dataset.root / dataset.meta.get_data_file_path(ep_index))
+                if dataset.meta._version >= packaging.version.parse("v3.0"):
+                    table = read_v3_episode_table(
+                        file,
+                        ep_index,
+                        dataset.meta.episodes[ep_index],
+                    )
+                else:
+                    table = pq.read_table(str(file))
+
+                result_dict = {}
+"""
+    replace_once(episode_table_before, episode_table_after, "v3 episode table filtering")
+
+    if changed:
+        path.write_text(source, encoding="utf-8")
     return changed
 
 

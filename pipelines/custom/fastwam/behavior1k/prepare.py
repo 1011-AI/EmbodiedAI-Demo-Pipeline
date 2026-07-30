@@ -12,10 +12,12 @@ from pipelines.custom.fastwam.behavior1k.adapter import (
     build_fastwam_data_config,
     copy_checkpoint_report_into_fastwam,
     copy_transform_into_fastwam,
+    copy_v3_shard_compat_into_fastwam,
     inspect_fastwam_source,
     patch_episode_selection,
     patch_checkpoint_load_report,
     patch_explicit_lerobot_keys,
+    patch_v3_shard_loading,
     project_r1pro_state_array,
 )
 
@@ -123,8 +125,25 @@ def discover_task_selection(
     if not episode_files:
         raise FastWAMBehaviorContractError("no meta/episodes Parquet files found")
     episode_dataset = ds.dataset([str(path) for path in episode_files], format="parquet")
+    required_columns = {
+        "episode_index",
+        "task_index",
+        "data/chunk_index",
+        "data/file_index",
+    }
+    missing_columns = sorted(required_columns - set(episode_dataset.schema.names))
+    if missing_columns:
+        raise FastWAMBehaviorContractError(
+            "BEHAVIOR-1K v3 episode metadata is missing flattened columns: "
+            f"{missing_columns}"
+        )
     table = episode_dataset.to_table(
-        columns=["episode_index", "task_index", "data"],
+        columns=[
+            "episode_index",
+            "task_index",
+            "data/chunk_index",
+            "data/file_index",
+        ],
         filter=pc.field("task_index") == int(task_index),
     )
     rows = table.to_pylist()
@@ -139,11 +158,10 @@ def discover_task_selection(
     )
     for row in rows:
         episode_indices.append(int(row["episode_index"]))
-        data_ref = row["data"]
         shards.add(
             data_template.format(
-                chunk_index=int(data_ref["chunk_index"]),
-                file_index=int(data_ref["file_index"]),
+                chunk_index=int(row["data/chunk_index"]),
+                file_index=int(row["data/file_index"]),
             )
         )
     episode_indices.sort()
@@ -284,6 +302,7 @@ class FastWAMBehaviorInstall:
     data_config: str
     task_config: str
     transform_module: str
+    v3_shard_module: str
     checkpoint_report_module: str
     source_capabilities: dict[str, Any]
 
@@ -304,6 +323,8 @@ def install_task0_configs(
     source_root = Path(fastwam_source_root).expanduser().resolve()
     patch_explicit_lerobot_keys(source_root)
     patch_episode_selection(source_root)
+    v3_shard_path = copy_v3_shard_compat_into_fastwam(source_root)
+    patch_v3_shard_loading(source_root)
     transform_path = copy_transform_into_fastwam(source_root)
     report_path = copy_checkpoint_report_into_fastwam(source_root)
     patch_checkpoint_load_report(source_root)
@@ -376,6 +397,7 @@ def install_task0_configs(
         data_config=str(data_path),
         task_config=str(task_path),
         transform_module=str(transform_path),
+        v3_shard_module=str(v3_shard_path),
         checkpoint_report_module=str(report_path),
         source_capabilities=capabilities.to_dict(),
     )

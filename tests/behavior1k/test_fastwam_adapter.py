@@ -12,11 +12,13 @@ from pipelines.custom.fastwam.behavior1k.adapter import (
     R1ProPolicyStateTransform,
     build_fastwam_data_config,
     copy_checkpoint_report_into_fastwam,
+    copy_v3_shard_compat_into_fastwam,
     inspect_fastwam_source,
     ordered_rgb_observations,
     patch_episode_selection,
     patch_checkpoint_load_report,
     patch_explicit_lerobot_keys,
+    patch_v3_shard_loading,
     project_r1pro_state_array,
 )
 from pipelines.custom.fastwam.behavior1k.checkpoint_report import (
@@ -164,6 +166,86 @@ def _write_fastwam_source_fixture(root: Path) -> None:
             '        if self.concat_multi_camera == "robotwin":\n'
             '            raise ValueError("requires exactly 3 cameras")\n'
         ),
+        "src/fastwam/datasets/lerobot/lerobot/lerobot_dataset.py": "\n".join(
+            [
+                "import traceback",
+                "",
+                'CODEBASE_VERSION = "v2.1"',
+                "",
+                "class LeRobotDatasetMetadata:",
+                "    def load_metadata(self):",
+                "        self.info = load_info(self.root)",
+                "        # TODO add new check",
+                "        # check_version_compatibility(self.repo_id, self._version, CODEBASE_VERSION)",
+                "        self.tasks, self.task_to_task_index = load_tasks(self.root)",
+                '        if (self.root / "annotations").exists():',
+                "            self.annotations = load_annotations(self.root)",
+                "        self.episodes = load_episodes(self.root)",
+                '        if self._version < packaging.version.parse("v2.1"):',
+                "            self.stats = load_stats(self.root)",
+                "            self.episodes_stats = backward_compatible_episodes_stats(self.stats, self.episodes)",
+                "        else:",
+                "            self.episodes_stats = load_episodes_stats(self.root)",
+                "            self.stats = aggregate_stats(list(self.episodes_stats.values()))",
+                "",
+                "    def get_data_file_path(self, ep_index: int) -> Path:",
+                "        if ep_index in self.episodes:",
+                "            episode = self.episodes[ep_index]",
+                '            data_chunk = episode.get("data/chunk_index")',
+                '            data_file = episode.get("data/file_index")',
+                "            if data_chunk is not None and data_file is not None:",
+                '                return Path(f"data/chunk-{int(data_chunk):03d}/file-{int(data_file):03d}.parquet")',
+                "        ep_chunk = self.get_episode_chunk(ep_index)",
+                "        fpath = self.data_path.format(episode_chunk=ep_chunk, episode_index=ep_index)",
+                "        return Path(fpath)",
+                "",
+                "    def get_video_file_path(self, ep_index: int, vid_key: str) -> Path:",
+                "        if ep_index in self.episodes:",
+                "            episode = self.episodes[ep_index]",
+                '            video_chunk = episode.get(f"videos/{vid_key}/chunk_index")',
+                '            video_file = episode.get(f"videos/{vid_key}/file_index")',
+                "            if video_chunk is not None and video_file is not None:",
+                '                return Path(f"videos/{vid_key}/chunk-{int(video_chunk):03d}/file-{int(video_file):03d}.mp4")',
+                "        ep_chunk = self.get_episode_chunk(ep_index)",
+                "        fpath = self.video_path.format(episode_chunk=ep_chunk, video_key=vid_key, episode_index=ep_index)",
+                "        return Path(fpath)",
+                "",
+                "class LeRobotDataset:",
+                "    def __init__(self):",
+                '        if self.episodes is not None and self.meta._version >= packaging.version.parse("v2.1"):',
+                "            episodes_stats = [self.meta.episodes_stats[ep_idx] for ep_idx in self.episodes]",
+                "            self.stats = aggregate_stats(episodes_stats)",
+                "",
+                "    def load_hf_dataset(self):",
+                "        if self.episodes is None:",
+                '            path = str(self.root / "data")',
+                '            hf_dataset = load_dataset("parquet", data_dir=path, split="train")',
+                "        else:",
+                "            files = sorted({str(self.root / self.meta.get_data_file_path(ep_idx)) for ep_idx in self.episodes})",
+                '            hf_dataset = load_dataset("parquet", data_files=files, split="train")',
+                "",
+                '        # TODO(aliberts): hf_dataset.set_format("torch")',
+                "        return hf_dataset",
+                "",
+                "    def _query_videos(self, query_timestamps, ep_idx):",
+                "        item = {}",
+                "        for vid_key, query_ts in query_timestamps.items():",
+                "            video_path = self.root / self.meta.get_video_file_path(ep_idx, vid_key)",
+                "            frames = decode_video_frames(video_path, query_ts, self.tolerance_s, self.video_backend)",
+                "            item[vid_key] = frames.squeeze(0)",
+                "",
+                "class MultiLeRobotDataset:",
+                "    def get_episode_data(self, episode_idx):",
+                "        for dataset in self._datasets:",
+                "            if episode_idx < dataset.num_episodes:",
+                "                ep_index = dataset.episodes[episode_idx] if dataset.episodes is not None else episode_idx",
+                "                file = str(dataset.root / dataset.meta.get_data_file_path(ep_index))",
+                "                table = pq.read_table(str(file))",
+                "",
+                "                result_dict = {}",
+            ]
+        )
+        + "\n",
         "src/fastwam/models/wan22/fastwam.py": (
             "class FastWAM:\n"
             "    def load_checkpoint(self, path, optimizer=None):\n"
@@ -187,10 +269,13 @@ def test_explicit_lerobot_key_patch_is_source_checked_and_idempotent(tmp_path: P
     before = inspect_fastwam_source(tmp_path)
     changed = patch_explicit_lerobot_keys(tmp_path)
     episode_changed = patch_episode_selection(tmp_path)
+    copy_v3_shard_compat_into_fastwam(tmp_path)
+    v3_changed = patch_v3_shard_loading(tmp_path)
     copy_checkpoint_report_into_fastwam(tmp_path)
     report_changed = patch_checkpoint_load_report(tmp_path)
     changed_again = patch_explicit_lerobot_keys(tmp_path)
     episode_changed_again = patch_episode_selection(tmp_path)
+    v3_changed_again = patch_v3_shard_loading(tmp_path)
     report_changed_again = patch_checkpoint_load_report(tmp_path)
     after = inspect_fastwam_source(tmp_path)
 
@@ -198,11 +283,14 @@ def test_explicit_lerobot_key_patch_is_source_checked_and_idempotent(tmp_path: P
     assert before.ready_for_behavior1k_config is False
     assert changed is True
     assert episode_changed is True
+    assert v3_changed is True
     assert report_changed is True
     assert changed_again is False
     assert episode_changed_again is False
+    assert v3_changed_again is False
     assert report_changed_again is False
     assert after.explicit_lerobot_key is True
+    assert after.lerobot_v3_shards is True
     assert after.ready_for_behavior1k_config is True
 
 

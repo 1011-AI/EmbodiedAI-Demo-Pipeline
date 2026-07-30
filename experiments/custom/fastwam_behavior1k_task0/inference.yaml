@@ -33,6 +33,10 @@ paths:
   source_root: upstreams/FastWAM-realrobot
   source_root_env: FASTWAM_SOURCE_ROOT
 
+  # DiffSynth 的本地 Wan VAE/T5/tokenizer 根目录。GPU 节点离线，入口会据此
+  # 设置 DIFFSYNTH_MODEL_BASE_PATH，并强制 DIFFSYNTH_SKIP_DOWNLOAD=true。
+  model_base: models
+
   # 推理证据、checkpoint load report 都写到这里；不会写入原数据集。
   output_dir: runs/experiments/custom/fastwam_behavior1k_task0/inference
 

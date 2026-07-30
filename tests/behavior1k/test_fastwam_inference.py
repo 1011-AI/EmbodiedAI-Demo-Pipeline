@@ -51,6 +51,19 @@ def _source_root(root: Path) -> Path:
                 '    raise ValueError("requires exactly 3 cameras")',
             ]
         ),
+        "src/fastwam/datasets/lerobot/lerobot/lerobot_dataset.py": "\n".join(
+            [
+                "load_v3_episode_metadata",
+                "filter_v3_hf_dataset",
+                "read_v3_episode_table",
+                "shift_v3_video_timestamps",
+                "v3_data_file_path",
+                "v3_video_file_path",
+            ]
+        ),
+        "src/fastwam/datasets/lerobot/lerobot/behavior1k_v3_shards.py": (
+            "# test v3 shared-shard helper\n"
+        ),
         "src/fastwam/models/wan22/fastwam.py": "\n".join(
             [
                 "def _filter_shape_compatible():",
@@ -373,6 +386,8 @@ def test_fastwam_inference_yaml_dry_run_checks_real_artifact_layout(
             for key, value in os.environ.items()
             if key
             not in {
+                "DIFFSYNTH_MODEL_BASE_PATH",
+                "DIFFSYNTH_SKIP_DOWNLOAD",
                 "TEST_FASTWAM_NATIVE_RUN_DIR",
                 "TEST_FASTWAM_CHECKPOINT",
                 "TEST_FASTWAM_SOURCE_ROOT",
@@ -387,6 +402,9 @@ def test_fastwam_inference_yaml_dry_run_checks_real_artifact_layout(
     assert "BEHAVIOR1K_FASTWAM_INFERENCE_DRY_RUN_OK" in result.stdout
     assert '"action_horizon": 32' in result.stdout
     assert '"execution_horizon": 16' in result.stdout
+    expected_model_base = ROOT / "models"
+    assert f'"diffsynth_model_base_path": "{expected_model_base}"' in result.stdout
+    assert '"diffsynth_skip_download": "true"' in result.stdout
     assert (
         "\"task_instruction\": \"Turn on the radio receiver that's on the "
         "table in the living room.\"" in result.stdout
