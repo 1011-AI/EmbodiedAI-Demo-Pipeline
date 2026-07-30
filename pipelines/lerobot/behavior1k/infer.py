@@ -19,6 +19,7 @@ from .adapter import (
     adapt_lerobot_dataset,
     load_behavior_view,
 )
+from .checkpoint import DELTA_MANIFEST, DELTA_WEIGHTS
 from .loading import (
     CheckpointLoadTee as _TeeStdout,
     make_policy_with_memory_strategy,
@@ -151,9 +152,18 @@ def _make_pi05_runtime(
 
     pretrained_dir = _resolve_pretrained_dir(checkpoint.expanduser().resolve())
     weights_path = pretrained_dir / "model.safetensors"
-    if not weights_path.is_file() or weights_path.stat().st_size <= 0:
+    delta_manifest_path = pretrained_dir / DELTA_MANIFEST
+    delta_weights_path = pretrained_dir / DELTA_WEIGHTS
+    has_full_weights = weights_path.is_file() and weights_path.stat().st_size > 0
+    has_delta_weights = (
+        delta_manifest_path.is_file()
+        and delta_weights_path.is_file()
+        and delta_weights_path.stat().st_size > 0
+    )
+    if not has_full_weights and not has_delta_weights:
         raise BehaviorLeRobotAdapterError(
-            f"PI0.5 checkpoint has no non-empty model.safetensors: {weights_path}"
+            "PI0.5 checkpoint has neither full model.safetensors nor a complete "
+            f"BEHAVIOR delta pair under {pretrained_dir}"
         )
     policy_config = PI05Config.from_pretrained(str(pretrained_dir))
     if policy_config.use_relative_actions:
