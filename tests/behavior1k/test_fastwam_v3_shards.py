@@ -9,6 +9,9 @@ import pytest
 pa = pytest.importorskip("pyarrow")
 pq = pytest.importorskip("pyarrow.parquet")
 
+from experiments.custom.fastwam_behavior1k_task0.run import (
+    _expected_text_embedding_path,
+)
 from pipelines.custom.fastwam.behavior1k.prepare import discover_task_selection
 from pipelines.custom.fastwam.behavior1k.v3_shards import (
     filter_v3_hf_dataset,
@@ -21,6 +24,22 @@ from pipelines.custom.fastwam.behavior1k.v3_shards import (
 
 
 VIDEO_KEY = "observation.rgb.zed_link_camera_0"
+
+
+def test_task0_text_embedding_cache_name_matches_fastwam_precompute() -> None:
+    path = _expected_text_embedding_path(
+        Path("/cache"),
+        task_instruction=(
+            "Turn on the radio receiver that's on the table in the living room."
+        ),
+        model_id="Wan-AI/Wan2.2-TI2V-5B",
+        context_len=128,
+    )
+
+    assert path.name == (
+        "3c6c057f0dd8a659b46826353422f560eb1a024e00c6cc9fc5f814ee10a84338."
+        "t5_len128.wan22ti2v5b.pt"
+    )
 
 
 def _write_real_v3_structure(root: Path) -> list[dict[str, Any]]:

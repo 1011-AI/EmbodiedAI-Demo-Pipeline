@@ -88,7 +88,10 @@ fastwam:
   wandb: false
 
   text_embeddings:
-    precompute: auto
+    # UMT5 权重约 11 GB，上游脚本会先把整份权重加载到 CPU，之后才检查缓存。
+    # 因此在大内存管理节点预计算一次，GPU 训练节点只读现成缓存。
+    precompute: false
+    context_len: 128
     gpus: 1
     overwrite: false
     wait_timeout: 3600

@@ -2,9 +2,11 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 from typing import Any
@@ -22,6 +24,23 @@ def find_project_root(start: Path) -> Path:
 def _project_path(project_root: Path, value: Any) -> Path:
     path = Path(str(value))
     return path if path.is_absolute() else project_root / path
+
+
+def _expected_text_embedding_path(
+    cache_dir: Path,
+    *,
+    task_instruction: str,
+    model_id: str,
+    context_len: int,
+) -> Path:
+    prompt = (
+        "A video recorded from a robot's point of view executing the following "
+        f"instruction: {task_instruction}"
+    )
+    prompt_hash = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
+    model_name = str(model_id).split("/")[-1]
+    encoder_id = re.sub(r"[^a-z0-9]+", "", model_name.lower()) or "textenc"
+    return cache_dir / f"{prompt_hash}.t5_len{context_len}.{encoder_id}.pt"
 
 
 def _run_dataset_smoke(
@@ -300,6 +319,23 @@ def main(argv: list[str] | None = None) -> int:
                 )
             ],
         )
+        text_config = (config.get("fastwam") or {}).get("text_embeddings") or {}
+        if not isinstance(text_config, dict):
+            raise SystemExit("ERROR: fastwam.text_embeddings must be a YAML mapping")
+        expected_text_cache = _expected_text_embedding_path(
+            text_cache,
+            task_instruction=task_instruction,
+            model_id=str((config.get("fastwam") or {}).get("model_id", "")),
+            context_len=int(text_config.get("context_len", 128)),
+        )
+        if expected_text_cache.is_file() and expected_text_cache.stat().st_size > 0:
+            print(f"FASTWAM_BEHAVIOR1K_TEXT_CACHE_READY {expected_text_cache}")
+        elif not args.prepare_only and not args.dataset_smoke and not args.dry_run:
+            raise SystemExit(
+                "ERROR: the exact Task 0 FastWAM text embedding cache is missing: "
+                f"{expected_text_cache}. Precompute it once on a high-memory "
+                "management node before launching GPU training."
+            )
     elif not args.dry_run:
         raise SystemExit(
             f"ERROR: generated FastWAM workspace is missing: {source_root}. "
