@@ -113,7 +113,14 @@ def main(argv: list[str] | None = None) -> int:
         env_key="checkpoint_env",
         required=False,
     )
+    base_checkpoint_value = _configured_value(
+        path_cfg,
+        key="base_checkpoint",
+        env_key="base_checkpoint_env",
+        required=True,
+    )
     assert native_value is not None and source_value is not None
+    assert base_checkpoint_value is not None
 
     native_path = _path(project_root, native_value)
     source_path = _path(project_root, source_value)
@@ -152,6 +159,7 @@ def main(argv: list[str] | None = None) -> int:
     paths = resolve_inference_paths(
         native_run_dir=native_path,
         source_root=source_path,
+        base_checkpoint=_path(project_root, base_checkpoint_value),
         checkpoint=checkpoint_path,
     )
     mode = args.mode or str(inference_cfg.get("mode") or "offline")
@@ -172,6 +180,7 @@ def main(argv: list[str] | None = None) -> int:
         "sample_index": sample_index,
         "device": str(inference_cfg.get("device", "cuda:0")),
         "require_cuda": bool(inference_cfg.get("require_cuda", True)),
+        "direct_cuda_load": bool(inference_cfg.get("direct_cuda_load", False)),
         "action_horizon": int(inference_cfg.get("action_horizon", 32)),
         "num_inference_steps": int(inference_cfg.get("num_inference_steps", 20)),
         "seed": int(inference_cfg.get("seed", 42)),
@@ -208,6 +217,7 @@ def main(argv: list[str] | None = None) -> int:
         output_dir=output_dir,
         device=resolved["device"],
         require_cuda=resolved["require_cuda"],
+        direct_cuda_load=resolved["direct_cuda_load"],
         action_horizon=resolved["action_horizon"],
         num_inference_steps=resolved["num_inference_steps"],
         seed=resolved["seed"],
@@ -228,6 +238,7 @@ def main(argv: list[str] | None = None) -> int:
         "action_horizon": resolved["action_horizon"],
         "execution_horizon": resolved["server"]["execution_horizon"],
         "checkpoint": paths.checkpoint,
+        "model_load_reports": policy.model_load_reports,
         "task_index": resolved["task_index"],
         "task_name": resolved["task_name"],
         "task_instruction": resolved["task_instruction"],

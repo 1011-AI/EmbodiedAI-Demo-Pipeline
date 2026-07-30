@@ -108,6 +108,28 @@ def flatten_overrides(overrides: Any) -> str:
     raise SystemExit("ERROR: fastwam.extra_overrides must be a string or a list of strings")
 
 
+def truthy(value: Any) -> bool:
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def require_action_only_for_delta(env: dict[str, str]) -> None:
+    """Reject a lossy checkpoint mode before any GPU process is launched."""
+
+    if not truthy(env["FASTWAM_LOW_MEMORY_CHECKPOINT"]):
+        return
+    action_only: str | None = None
+    for token in shlex.split(env["FASTWAM_EXTRA_OVERRIDES"]):
+        normalized = token.lstrip("+")
+        if normalized.startswith("train_action_expert_only="):
+            action_only = normalized.split("=", 1)[1]
+    if action_only is None or not truthy(action_only):
+        raise SystemExit(
+            "ERROR: fastwam.low_memory_checkpoint=true only preserves the action "
+            "expert and proprio encoder, so fastwam.extra_overrides must end with "
+            "train_action_expert_only=true"
+        )
+
+
 def load_config(path: Path) -> dict[str, Any]:
     payload = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
     if not isinstance(payload, dict):
@@ -166,7 +188,16 @@ def build_env(config: dict[str, Any], project_root: Path, config_path: Path) -> 
         "FASTWAM_MIXED_PRECISION": str(fastwam.get("mixed_precision", "bf16")),
         "FASTWAM_WANDB_ENABLE": bool_text(fastwam.get("wandb", False)),
         "FASTWAM_EXTRA_OVERRIDES": flatten_overrides(fastwam.get("extra_overrides")),
+        "FASTWAM_DIRECT_CUDA_LOAD": env_override(
+            "FASTWAM_DIRECT_CUDA_LOAD",
+            bool_text(fastwam.get("direct_cuda_load", False)),
+        ),
+        "FASTWAM_LOW_MEMORY_CHECKPOINT": env_override(
+            "FASTWAM_LOW_MEMORY_CHECKPOINT",
+            bool_text(fastwam.get("low_memory_checkpoint", False)),
+        ),
     }
+    require_action_only_for_delta(env)
 
     # Model assets and the text embedding cache are part of the real FastWAM
     # training path. They are exposed in YAML so experiments can switch weights

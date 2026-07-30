@@ -20,6 +20,7 @@ from pipelines.custom.fastwam.behavior1k.inference import (
     resolve_dataset_task_spec,
     resolve_inference_paths,
     resolve_native_run_dir,
+    validate_model_load_reports,
 )
 
 
@@ -64,6 +65,20 @@ def _source_root(root: Path) -> Path:
         "src/fastwam/datasets/lerobot/lerobot/behavior1k_v3_shards.py": (
             "# test v3 shared-shard helper\n"
         ),
+        "src/fastwam/models/wan22/helpers/loader.py": "\n".join(
+            [
+                'FASTWAM_DIRECT_CUDA_LOAD_ENV = "FASTWAM_DIRECT_CUDA_LOAD"',
+                "with _direct_model_init(device, torch_dtype):",
+                "    model = model_class()",
+            ]
+        ),
+        "src/fastwam/models/wan22/action_dit.py": "\n".join(
+            [
+                'FASTWAM_DIRECT_CUDA_LOAD_ENV = "FASTWAM_DIRECT_CUDA_LOAD"',
+                "with _direct_model_init(device, torch_dtype):",
+                "    action_expert = cls()",
+            ]
+        ),
         "src/fastwam/models/wan22/fastwam.py": "\n".join(
             [
                 "def _filter_shape_compatible():",
@@ -72,12 +87,19 @@ def _source_root(root: Path) -> Path:
                 "from fastwam.utils.behavior1k_checkpoint_report import (",
                 "    write_fastwam_load_report_from_environment,",
                 ")",
+                'FASTWAM_DIRECT_CUDA_LOAD_ENV = "FASTWAM_DIRECT_CUDA_LOAD"',
+                "mmap=direct_cuda",
+                'FASTWAM_LOW_MEMORY_CHECKPOINT_ENV = "FASTWAM_LOW_MEMORY_CHECKPOINT"',
+                'checkpoint_scope = "action_delta"',
             ]
         ),
         "src/fastwam/utils/behavior1k_checkpoint_report.py": (
             "def write_fastwam_load_report_from_environment(): pass\n"
         ),
-        "src/fastwam/trainer.py": "train_action_expert_only = True\n",
+        "src/fastwam/trainer.py": (
+            "train_action_expert_only = True\n"
+            "FASTWAM_LOW_MEMORY_CHECKPOINT\n"
+        ),
     }
     for relative, text in files.items():
         path = source / relative
@@ -104,6 +126,114 @@ def test_native_run_and_checkpoint_resolution_uses_native_pointer_and_numeric_st
     assert resolve_native_run_dir(wrapper) == native.resolve()
     assert resolve_checkpoint(native, None) == step100.resolve()
     assert resolve_checkpoint(native, "checkpoints/weights/step_000009.pt") == step9.resolve()
+
+
+def test_model_load_reports_require_full_video_base_and_complete_delta(
+    tmp_path: Path,
+) -> None:
+    base = tmp_path / "base.json"
+    trained = tmp_path / "trained.json"
+    base.write_text(
+        json.dumps(
+            {
+                "checkpoint_scope": "full",
+                "loaded_keys": ["mot.mixtures.video.blocks.0.weight"],
+                "missing_checkpoint_keys": [],
+                "skipped_shape_mismatch": [
+                    {"key": "mot.mixtures.action.head.weight"}
+                ],
+                "summary": {
+                    "loaded": 1647,
+                    "shape_mismatch": 4,
+                    "missing_checkpoint": 0,
+                    "reinitialized": 4,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    trained.write_text(
+        json.dumps(
+            {
+                "checkpoint_scope": "action_delta",
+                "loaded_keys": ["mot.mixtures.action.head.weight"],
+                "missing_checkpoint_keys": [],
+                "skipped_shape_mismatch": [],
+                "summary": {
+                    "loaded": 826,
+                    "shape_mismatch": 0,
+                    "unexpected_checkpoint": 0,
+                    "missing_checkpoint": 0,
+                    "reinitialized": 0,
+                    "inherited_from_base": 825,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = validate_model_load_reports(base, trained)
+    assert result["load_status"] == "success"
+    assert result["trained"]["checkpoint_scope"] == "action_delta"
+
+    broken = json.loads(base.read_text(encoding="utf-8"))
+    broken["checkpoint_scope"] = "action_delta"
+    base.write_text(json.dumps(broken), encoding="utf-8")
+    with pytest.raises(FastWAMBehaviorContractError, match="must be a full"):
+        validate_model_load_reports(base, trained)
+
+
+def test_model_load_reports_reject_missing_video_or_incomplete_trained_weights(
+    tmp_path: Path,
+) -> None:
+    base = tmp_path / "base.json"
+    trained = tmp_path / "trained.json"
+    base.write_text(
+        json.dumps(
+            {
+                "checkpoint_scope": "full",
+                "loaded_keys": ["mot.mixtures.video.blocks.0.weight"],
+                "missing_checkpoint_keys": [
+                    "mot.mixtures.video.blocks.1.weight"
+                ],
+                "skipped_shape_mismatch": [],
+                "summary": {"loaded": 1},
+            }
+        ),
+        encoding="utf-8",
+    )
+    trained.write_text(
+        json.dumps(
+            {
+                "checkpoint_scope": "action_delta",
+                "loaded_keys": ["mot.mixtures.action.head.weight"],
+                "missing_checkpoint_keys": [],
+                "skipped_shape_mismatch": [],
+                "summary": {
+                    "loaded": 1,
+                    "shape_mismatch": 0,
+                    "unexpected_checkpoint": 0,
+                    "missing_checkpoint": 0,
+                    "reinitialized": 0,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(
+        FastWAMBehaviorContractError,
+        match="leaves video-expert weights uninitialized",
+    ):
+        validate_model_load_reports(base, trained)
+
+    base_payload = json.loads(base.read_text(encoding="utf-8"))
+    base_payload["missing_checkpoint_keys"] = []
+    base.write_text(json.dumps(base_payload), encoding="utf-8")
+    trained_payload = json.loads(trained.read_text(encoding="utf-8"))
+    trained_payload["summary"]["shape_mismatch"] = 1
+    trained.write_text(json.dumps(trained_payload), encoding="utf-8")
+    with pytest.raises(FastWAMBehaviorContractError, match="is incomplete"):
+        validate_model_load_reports(base, trained)
 
 
 def test_task_spec_uses_exact_dataset_instruction_not_slug(tmp_path: Path) -> None:
@@ -145,19 +275,27 @@ def test_resolved_inference_paths_require_config_stats_source_and_checkpoint(
     native = _native_run(tmp_path)
     checkpoint = native / "checkpoints/weights/step_000001.pt"
     checkpoint.touch()
+    base_checkpoint = tmp_path / "release.pt"
+    base_checkpoint.touch()
     source = _source_root(tmp_path)
 
     paths = resolve_inference_paths(
         native_run_dir=native,
         source_root=source,
+        base_checkpoint=base_checkpoint,
     )
 
     assert paths.native_run_dir == str(native.resolve())
+    assert paths.base_checkpoint == str(base_checkpoint.resolve())
     assert paths.checkpoint == str(checkpoint.resolve())
     assert paths.source_root == str(source.resolve())
     (native / "dataset_stats.json").unlink()
     with pytest.raises(FastWAMBehaviorContractError, match="incomplete"):
-        resolve_inference_paths(native_run_dir=native, source_root=source)
+        resolve_inference_paths(
+            native_run_dir=native,
+            source_root=source,
+            base_checkpoint=base_checkpoint,
+        )
 
 
 def test_evaluator_observation_accepts_official_flat_keys_and_canonical_keys() -> None:
@@ -318,7 +456,10 @@ def test_fastwam_product_path_calls_real_upstream_model_processor_and_server() -
     ).read_text(encoding="utf-8")
 
     assert "self.model = instantiate(cfg.model" in inference_source
+    assert "self.model.load_checkpoint(paths.base_checkpoint)" in inference_source
     assert "self.model.load_checkpoint(paths.checkpoint)" in inference_source
+    assert "base_model_load_report.json" in inference_source
+    assert "delta_model_load_report.json" in inference_source
     assert "self.dataset = instantiate(cfg.data.train)" in inference_source
     assert "self.model.infer_action(" in inference_source
     assert "self.processor.action_state_merger.backward" in inference_source
@@ -351,6 +492,8 @@ def test_fastwam_inference_yaml_dry_run_checks_real_artifact_layout(
                 "  native_run_dir_env: TEST_FASTWAM_NATIVE_RUN_DIR",
                 "  checkpoint:",
                 "  checkpoint_env: TEST_FASTWAM_CHECKPOINT",
+                f"  base_checkpoint: {native / 'base.pt'}",
+                "  base_checkpoint_env: TEST_FASTWAM_BASE_CHECKPOINT",
                 f"  source_root: {source}",
                 "  source_root_env: TEST_FASTWAM_SOURCE_ROOT",
                 f"  output_dir: {tmp_path / 'output'}",
@@ -359,6 +502,7 @@ def test_fastwam_inference_yaml_dry_run_checks_real_artifact_layout(
                 "  sample_index: 4",
                 "  device: cuda:0",
                 "  require_cuda: true",
+                "  direct_cuda_load: true",
                 "  action_horizon: 32",
                 "  num_inference_steps: 20",
                 "  seed: 42",
@@ -371,6 +515,7 @@ def test_fastwam_inference_yaml_dry_run_checks_real_artifact_layout(
         + "\n",
         encoding="utf-8",
     )
+    (native / "base.pt").touch()
 
     result = subprocess.run(
         [
@@ -390,6 +535,7 @@ def test_fastwam_inference_yaml_dry_run_checks_real_artifact_layout(
                 "DIFFSYNTH_SKIP_DOWNLOAD",
                 "TEST_FASTWAM_NATIVE_RUN_DIR",
                 "TEST_FASTWAM_CHECKPOINT",
+                "TEST_FASTWAM_BASE_CHECKPOINT",
                 "TEST_FASTWAM_SOURCE_ROOT",
             }
         },
@@ -401,6 +547,7 @@ def test_fastwam_inference_yaml_dry_run_checks_real_artifact_layout(
     assert "BEHAVIOR1K_FASTWAM_INFERENCE_RESOLVED" in result.stdout
     assert "BEHAVIOR1K_FASTWAM_INFERENCE_DRY_RUN_OK" in result.stdout
     assert '"action_horizon": 32' in result.stdout
+    assert '"direct_cuda_load": true' in result.stdout
     assert '"execution_horizon": 16' in result.stdout
     expected_model_base = ROOT / "models"
     assert f'"diffsynth_model_base_path": "{expected_model_base}"' in result.stdout
@@ -419,6 +566,7 @@ def test_inference_yaml_documents_chunk_and_reset_contract() -> None:
     ).read_text(encoding="utf-8")
 
     assert "action_horizon: 32" in text
+    assert "direct_cuda_load: true" in text
     assert "execution_horizon: 16" in text
     assert "task_index: 0" in text
     assert (

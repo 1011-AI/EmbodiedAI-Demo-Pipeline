@@ -28,8 +28,7 @@ export FASTWAM_NATIVE_RUN_DIR=/absolute/path/to/native/run
   experiments/custom/fastwam_behavior1k_task0/infer.py \
   --dry-run
 
-/workspace/miniconda3/envs/fastwam/bin/python \
-  experiments/custom/fastwam_behavior1k_task0/infer.py
+python experiments/custom/fastwam_behavior1k_task0/infer.py
 ```
 
 `--dry-run` 只校验 source、native config、normalization stats 和 checkpoint，
@@ -37,25 +36,59 @@ export FASTWAM_NATIVE_RUN_DIR=/absolute/path/to/native/run
 真实命令会执行：
 
 1. Hydra 构造 native `cfg.model` 和 `cfg.data.train`；
-2. 调用 overlay 的 `FastWAM.load_checkpoint()`；
-3. 通过同一个 FastWAM Processor 读取三路 RGB、执行 `state 61D -> 23D` 与
+2. 先调用 overlay 的 `FastWAM.load_checkpoint()` 恢复 release/base，再加载
+   action/proprio delta 覆盖；
+3. 在两次真实加载都返回后校验 load report：base 必须包含完整 video expert，
+   delta/full checkpoint 不能有 missing、mismatch、unexpected 或 reinitialized key；
+4. 通过同一个 FastWAM Processor 读取三路 RGB、执行 `state 61D -> 23D` 与
    normalization；
-4. 对照数据集 `meta/tasks.jsonl` 校验 Task 0 的完整英文 instruction，并通过
+5. 对照数据集 `meta/tasks.jsonl` 校验 Task 0 的完整英文 instruction，并通过
    `RobotVideoDataset._get_cached_text_context()` 加载训练时同一份 T5 context；
-5. 调用 `FastWAM.infer_action()`；
-6. 通过 Processor 内的 merger 与 normalizer 反向路径恢复原始 23D action；
-7. 写出 `inference_evidence.json` 和 `model_load_report.json`。
+6. 调用 `FastWAM.infer_action()`；
+7. 通过 Processor 内的 merger 与 normalizer 反向路径恢复原始 23D action；
+8. 写出 `inference_evidence.json`、`base_model_load_report.json` 和
+   `delta_model_load_report.json`。
 
 输出 action chunk 固定为 finite、contiguous `float32[T,23]`。`T` 默认 32。
 `turning_on_radio` 只是 task slug，不能替代完整 instruction；否则 prompt hash
 会与训练缓存不一致，入口会在加载 5B 模型前报错。
 
+`inference.yaml` 的 `direct_cuda_load: true` 会在模型构造和 checkpoint
+加载之前显式启用低 CPU 内存路径。训练端 `low_memory_checkpoint: true`
+写出的是基于 release checkpoint 的 action/proprio delta；它可用于真实推理，
+但不能直接作为 trainer 的单一 `resume` 继续训练。续训需要实现 base->delta
+双预载，或在大内存环境保存 full state。
+
+## 已验证结果（2026-07-30）
+
+真实 Task 0 action-only smoke 完成 1 个训练 step，记录 loss `0.8314`。这只验证前向、
+反向、更新和保存路径，不足以判断 loss 是否正常下降、模型是否收敛或任务是否成功。
+
+推理按 release/base→delta 顺序加载：
+
+| 产物或检查 | 已验证结果 |
+|---|---|
+| release/base | `12,041,735,140` bytes；loaded `1647`、shape mismatch / reinitialized `4`、missing / unexpected `0` |
+| action/proprio delta | `2,042,148,165` bytes；`checkpoint_scope=action_delta`；loaded `826`、inherited from base `825`、shape mismatch / missing / reinitialized `0` |
+| 离线输出 | finite、contiguous `float32[32,23]`，单次耗时约 `25.07 s` |
+| WebSocket 输入 | 真实 Task 0 episode 0/frame 0：61D state、head RGB、left wrist RGB、right wrist RGB |
+| WebSocket 输出 | finite `float32[23]`；reset 后输出完全一致，最大绝对差为 `0` |
+
+训练外层记录位于
+`runs/experiments/custom/fastwam_behavior1k_task0/fastwam_behavior1k_task0_gpu3_direct_20260730_145405/`。
+离线推理证据是其中的 `inference/inference_evidence.json`，真实帧服务探针证据是
+`inference/websocket_frame0_evidence.json`；这些运行资产被 Git 忽略。`25.07 s` 是单次
+离线探针，不是正式吞吐 benchmark。
+
+delta 当前是推理就绪产物，不是可独立续训的完整 checkpoint。trainer 的 native 配置会在
+`skip_dit_load_from_pretrain=true` 时跳过 video expert 预训练载入；若只把 delta 填入
+`resume`，video expert 会保持随机初始化。后续续训必须增加 release/base→delta 双预载，
+或改用包含模型、optimizer 和 RNG 状态的完整 checkpoint。
+
 ## 启动 evaluator policy server
 
 ```bash
-/workspace/miniconda3/envs/fastwam/bin/python \
-  experiments/custom/fastwam_behavior1k_task0/infer.py \
-  --mode serve
+python experiments/custom/fastwam_behavior1k_task0/infer.py --mode serve
 ```
 
 默认监听 `0.0.0.0:8000`，并复用项目统一的 BEHAVIOR policy server：
@@ -79,4 +112,5 @@ export FASTWAM_NATIVE_RUN_DIR=/absolute/path/to/native/run
 23D/chunk 协议、dry-run 和真实上游调用路径的静态回归。只有在 GPU 上生成
 `validation_status: gpu_executed` 的 `inference_evidence.json` 后，才能声称
 FastWAM checkpoint 离线推理已实际通过；完成一次官方 OmniGibson rollout 前，
-也不能声称闭环评测通过。
+也不能声称闭环评测通过。目前 simulator 环境、资产以及 NVIDIA Isaac Sim / BEHAVIOR
+交互许可尚未准备完成，因此真实 rollout 仍是外部阻塞项，不是模型服务已通过的证据。

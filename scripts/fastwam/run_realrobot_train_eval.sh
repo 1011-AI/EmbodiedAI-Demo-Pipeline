@@ -207,6 +207,11 @@ export NCCL_DEBUG="${FASTWAM_NCCL_DEBUG:-WARN}"
 export MASTER_ADDR="${FASTWAM_MASTER_ADDR}"
 export MASTER_PORT="${FASTWAM_MASTER_PORT}"
 export RUN_ID
+# Both memory-saving paths are explicit experiment switches.  Their default is
+# the pinned upstream behavior; Behavior-1K enables them because the 5B fp32
+# host construction and full-state save do not fit a 16 GB CPU cgroup.
+export FASTWAM_DIRECT_CUDA_LOAD="${FASTWAM_DIRECT_CUDA_LOAD:-0}"
+export FASTWAM_LOW_MEMORY_CHECKPOINT="${FASTWAM_LOW_MEMORY_CHECKPOINT:-0}"
 
 # 默认绕开 torchcodec，避免当前集群缺 FFmpeg 动态库时每个 worker 都打印 traceback。
 # prepare_fastwam_overlay.sh 会给 generated FastWAM workspace 打一个很小的兼容补丁，
@@ -388,6 +393,8 @@ manifest = {
     "total_processes": int("${TOTAL_PROCESSES}"),
     "node_rank": int("${FASTWAM_NODE_RANK}"),
     "mixed_precision": "${FASTWAM_MIXED_PRECISION}",
+    "direct_cuda_load": "${FASTWAM_DIRECT_CUDA_LOAD}",
+    "low_memory_checkpoint": "${FASTWAM_LOW_MEMORY_CHECKPOINT}",
     "init": "${FASTWAM_INIT}",
     "model_id": "${FASTWAM_MODEL_ID}",
     "redirect_common_files": "${FASTWAM_REDIRECT_COMMON_FILES}",

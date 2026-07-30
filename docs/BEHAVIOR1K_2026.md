@@ -33,6 +33,27 @@ official JSON/video + project run manifest/summary
 不要使用 BEHAVIOR-1K v3.9.0 训练或评测 2026 数据。v3.9.1 修正了 R1Pro
 `base_qvel` 坐标系，并与更新后的数据状态保持一致。
 
+## 当前验证状态
+
+以下状态来自 2026-07-30 的真实数据、模型和 GPU 运行，不把静态检查、dry-run 或协议
+smoke 冒充成训练/评测结果。
+
+| 路线 | 已验证 | 未完成或受阻 |
+|---|---|---|
+| 数据 | 完整数据 mount 可读；Task 0 有 200 episodes、429,928 frames、2 个实际引用的 data shards；物化视图约 1.9 GB；LeRobot 和 FastWAM loader 均读取过真实样本 | 其余 99 个任务尚未逐一做训练级验证 |
+| LeRobot π0.5 | 用真实 Task 0 数据完成 2-step expert-only 后训练；保存并严格重载 delta checkpoint；离线推理得到 finite `[1,32,23]`；policy server 用真实 episode 0/frame 0 observation 返回 finite `float32[23]` | 仅两个随机训练 step，loss 为 `0.173`、`0.463`，不能据此声称 loss 正常下降、收敛或任务成功；未做 simulator rollout |
+| custom FastWAM | 用真实 Task 0 数据完成 1-step action-only 后训练，loss 为 `0.8314`；约 12 GB release base 与约 2.04 GB action/proprio delta 已按 base→delta 顺序重载；离线推理得到 finite `float32[32,23]`；policy server 用真实 episode 0/frame 0 observation 返回 finite `float32[23]`，reset 后结果可重复 | 仅一个训练 step，不能据此声称 loss 正常下降、收敛或任务成功；delta 只完成推理重载，不能直接作为 trainer 的单一 resume；未做 simulator rollout |
+| evaluator | 独立 BEHAVIOR-1K checkout 已固定到 `v3.9.1`；Task 0 public indices 0–19 的编排 dry-run 和本项目 WebSocket contract smoke 已通过 | simulator Python 环境、OmniGibson/Isaac Sim 资产及必要许可/数据条款尚未准备，未执行任何真实官方 rollout，也没有成功率 |
+
+π0.5 本次训练证据位于
+`runs/experiments/lerobot/pi05_behavior1k_task0/20260730_140133_448471/`，离线推理证据位于
+`runs/experiments/lerobot/pi05_behavior1k_task0/20260730_140910_622779/inference/`。
+FastWAM 本次训练外层记录位于
+`runs/experiments/custom/fastwam_behavior1k_task0/fastwam_behavior1k_task0_gpu3_direct_20260730_145405/`，
+离线推理和服务探针证据位于该实验的 `inference/` 目录。
+这些目录是运行资产并被 Git 忽略；公开仓库提供生成它们的配置、入口和校验逻辑，而不提交
+模型权重或运行大文件。
+
 ### 与 1011-AI/Behavior 工作区的关系
 
 `1011-AI/Behavior@agent/publish-behavior-baselines` 是团队的 evaluator 安装与复现工作区，
@@ -115,6 +136,26 @@ sum(49:51)      right gripper position
 
 完整源数据中的 Depth 不删除，但默认不解码；面向 GPU 的第一阶段任务投影不包含 Depth。
 启用 Depth 前必须确认 `gray12le` 解码和毫米单位。
+
+### Task 0 的真实数据映射
+
+Task 0 固定为：
+
+| 字段 | 值 |
+|---|---|
+| `task_index` | `0` |
+| task slug | `turning_on_radio` |
+| instruction | `Turn on the radio receiver that's on the table in the living room.` |
+| episodes | `200` |
+| frames | `429,928` |
+| 训练相机 | head、left wrist、right wrist RGB |
+| state/action | 61D raw state → 23D policy state；23D mixed action |
+| action horizon | 32 |
+
+Task 0 物化视图实际引用 2 个 Parquet data shards 和 10 个 RGB MP4 文件。MP4 是
+LeRobot v3 的分片文件而不是“一条 episode 一个视频”，因此文件数不能用来推断 episode
+数量。episode、row range 和视频 timestamp 的对应关系只能读取 `meta/info.json`、
+episode metadata 与本项目生成的 `episodes.jsonl`，不能按文件名猜测。
 
 ## 数据检查
 
@@ -242,8 +283,28 @@ python pipelines/evaluation/behavior1k/run.py \
   --dry-run
 ```
 
-policy server 启动并通过 `/healthz` 后，去掉 `--dry-run` 即可运行。第一批 Task 0
-public indices 0–9 使用：
+当前已真实完成 `task0_smoke.yaml` 和 `task0_public_0_19.yaml` 的 dry-run；后者逐项生成
+了 0–19 共 20 个 public index 的官方命令。dry-run 只证明以下内容：
+
+- checkout/tag/commit、入口文件和 YAML 可被 runner 解析；
+- policy endpoint、官方命令、输出目录和 resume 状态可以确定；
+- 不会创建虚假成功 JSON。
+
+它不会 import/启动 OmniGibson、不会读取 simulator 资产、不会连接 policy，也不会产生
+rollout 或分数。当前工作区缺少完整 evaluator Python 环境和 simulator assets；Isaac Sim
+EULA、BEHAVIOR dataset terms 等交互许可也尚未由用户接受。因此真实 evaluator 仍处于
+阻塞状态，任何 public index 都不能标记为已评测。
+
+许可与数据条款必须由使用者按照上游流程交互确认，不能由项目脚本静默接受。准备完成后
+至少先验证：
+
+```bash
+"$BEHAVIOR1K_PYTHON" -c 'import omnigibson; print(omnigibson.__file__)'
+test -f "$BEHAVIOR1K_REPO_ROOT/OmniGibson/omnigibson/eval/eval.py"
+```
+
+然后启动 policy server 并确认 `/healthz`，再去掉 `--dry-run` 运行单 instance、10-step
+smoke。第一批 Task 0 public indices 0–9 使用：
 
 ```bash
 python pipelines/evaluation/behavior1k/run.py \
@@ -328,6 +389,43 @@ expert 与投影层参与反向更新。checkpoint 保存为
 断点续训；需要可恢复长训时应在独占大内存容器中关闭该开关，或后续接入 FSDP 分片
 checkpoint。
 
+#### 已验证的 π0.5 结果
+
+本次真实探针加载了约 14 GB π0.5 base 与本地 PaliGemma runtime cache，并在完整 Task 0
+索引上执行了 2 个 expert-only update。可训练参数为 `693,422,112`，总参数为
+`4,143,404,816`。训练记录的两个 loss 分别为 `0.173` 和 `0.463`；样本与扩散噪声具有
+随机性，这一长度只用于验证反向、更新和保存链路，不能评价 loss 趋势。
+
+第 2 step 生成了可推理的 delta checkpoint。严格重载后，对真实 Task 0 样本得到：
+
+| 检查 | 结果 |
+|---|---|
+| offline action chunk | finite `float32[1,32,23]` |
+| offline latency | 约 `1,510 ms`（单次探针，不是正式 benchmark） |
+| WebSocket input | episode 0 / frame 0 的 61D proprio 与三路真实 RGB |
+| WebSocket output | finite `float32[23]` |
+| server / client RTT | 约 `678 ms` / `700 ms`（单次探针） |
+
+下一项训练验收应是固定小样本的 20–100 step overfit 或更长、可重复的 pilot，并同时记录
+loss 曲线与吞吐；在此之前 README 和报告中都不得写“loss 正常下降”。
+
+启动同一 checkpoint 的配置化 policy server：
+
+```bash
+# 先把 server.yaml 的 paths.checkpoint 指向训练产物的 pretrained_model 目录。
+python pipelines/lerobot/behavior1k/serve.py \
+  --config experiments/lerobot/pi05_behavior1k_task0/server.yaml \
+  --dry-run
+
+python pipelines/lerobot/behavior1k/serve.py \
+  --config experiments/lerobot/pi05_behavior1k_task0/server.yaml
+
+curl --fail http://127.0.0.1:8000/healthz
+```
+
+server dry-run 不加载模型；只有服务启动、真实 observation 往返和 finite action 校验均成功，
+才算 server probe 完成。
+
 ### custom FastWAM
 
 - 复用 FastWAM/Wan 中形状兼容的 backbone；
@@ -344,20 +442,72 @@ FASTWAM_PREPARE_LIBERO_DATA=0 \
   FASTWAM_SOURCE_MODE=sync \
   bash scripts/fastwam/prepare_fastwam_overlay.sh
 
-# 生成 23D stats、安装固定版本 overlay 配置。
+# 以下三条在可读取原始数据、内存充足的管理节点执行。
+export BEHAVIOR1K_DATA_ROOT=/path/to/2026-challenge-demos
+
+# 发现真实 200 episodes，生成 23D stats 并安装固定版本 overlay 配置。
 python experiments/custom/fastwam_behavior1k_task0/run.py --prepare-only
+
+# UMT5 权重约 11 GB；只在管理节点预计算一次，命中缓存时会直接复用。
+python experiments/custom/fastwam_behavior1k_task0/run.py --precompute-text-embeds
+
+# 以下命令在 GPU 节点执行。若 GPU 可直接读取完整共享 mount，可继续使用上面的根目录；
+# 否则改为先前物化的 Task 0 根目录。
+export BEHAVIOR1K_DATA_ROOT=/path/to/2026-challenge-demos-or-task0-materialized
 
 # 使用上游真实 LeRobot loader 读取一条样本并核对 tensor shape。
 python experiments/custom/fastwam_behavior1k_task0/run.py --dataset-smoke
 
-# 先看完整命令，再启动默认 one-step CUDA smoke。
+# 先解析完整命令，再启动默认 one-step CUDA smoke。
 python experiments/custom/fastwam_behavior1k_task0/run.py --dry-run
 python experiments/custom/fastwam_behavior1k_task0/run.py
 ```
 
-默认 smoke 会真实加载 release checkpoint 并保存
-`model_load_report.json`；7D action head 和旧 proprio encoder 的 shape mismatch 必须明确记录为
-reinitialized，不能静默假装完整加载。
+已验证的真实 dataset smoke 输出为：
+
+```text
+pixel_values: (3, 33, 3, 224, 224)
+action:       (32, 23)
+proprio:      (33, 23)
+```
+
+Task 0 文本缓存只包含完整 instruction 对应的一个 T5 context，位于
+`data/custom/fastwam/behavior1k/text_embeds/task0000/`。训练节点不会重新加载 11 GB UMT5
+来生成该缓存。
+
+显式低内存开关会直接在目标 CUDA/bfloat16 device 构造并加载大权重，从而避开默认
+CPU-first 路径的 cgroup 内存峰值；普通大内存环境仍可关闭该开关回到上游路径。2026-07-30
+的真实结果如下：
+
+| 检查 | 结果 |
+|---|---|
+| release/base | `12,041,735,140` bytes；load report 为 loaded `1647`、shape mismatch `4`、reinitialized `4`、missing `0`、unexpected `0` |
+| 23D 适配 | 3 个 7D action 参数和 1 个 8D proprio 参数不兼容，均被明确记录并重新初始化 |
+| 后训练 | 真实 Task 0 action-only 训练完成 1 step，loss `0.8314` |
+| action/proprio delta | `2,042,148,165` bytes，`checkpoint_scope=action_delta`；load report 为 loaded `826`、inherited from base `825`、shape mismatch `0`、missing `0`、reinitialized `0` |
+| 离线推理 | 按 release/base→delta 顺序重载，得到 finite、contiguous `float32[32,23]`；单次耗时约 `25.07 s`，不是正式 benchmark |
+| WebSocket 服务 | 输入真实 Task 0 episode 0/frame 0 的 61D state 和三路 RGB，返回 finite `float32[23]`；reset 后 action 完全一致，最大绝对差为 `0` |
+
+这组证据证明训练反向、低内存 checkpoint、严格重载、离线 action chunk 和统一 policy
+server 已串联成功。它不证明 loss 趋势或任务成功：`0.8314` 只有一个 step，`25.07 s`
+也只是一次离线探针。delta 只包含 action expert/proprio 相关状态；推理时必须先加载
+release/base，再覆盖 delta。它不能直接作为 trainer 的单一 `resume`，否则在当前 native
+训练配置下 video expert 会保持随机初始化；续训需要实现 base→delta 双预载，或保存完整
+训练状态。
+
+配置化推理入口为：
+
+```bash
+export FASTWAM_NATIVE_RUN_DIR=/path/to/FastWAM-realrobot/runs/behavior1k_task0_action_only/<run_id>
+
+python experiments/custom/fastwam_behavior1k_task0/infer.py --dry-run
+python experiments/custom/fastwam_behavior1k_task0/infer.py
+python experiments/custom/fastwam_behavior1k_task0/infer.py --mode serve
+```
+
+上述命令已对真实 native run 完成离线推理和 WebSocket observation 往返。它们尚未在
+OmniGibson/BEHAVIOR simulator 内执行 rollout；官方 simulator 环境、资产和交互许可准备
+完成前，不能报告闭环成功率。
 
 ## 运行产物
 
@@ -384,11 +534,19 @@ rollout 数量计算，并支持按 instance 续跑。
 
 ## 里程碑
 
-1. 数据 revision、schema 和 Task 0 引用检查通过；
-2. π0.5 Task 0 可训练、loss 下降、可重载和离线推理；
-3. π0.5 完成一个 public instance 闭环；
-4. FastWAM 完成相同训练、推理和闭环；
-5. 两个模型跑 public indices 0–9；
-6. 再扩到更多任务、分布式训练和可视化。
+按重要性和依赖关系推进：
+
+1. **已完成：数据入口。** 固定 revision/schema，验证 Task 0 引用、61D→23D 映射、
+   stats、物化视图和两条路线的真实 loader。
+2. **部分完成：π0.5 后训练与推理。** 2-step、checkpoint、offline inference 和 server
+   probe 已完成；下一步补固定小样本 overfit/更长 pilot，确认可重复的 loss 趋势。
+3. **已完成：FastWAM 基础后训练与推理链路。** 真实 one-step、base→delta checkpoint
+   重载、offline inference 和 server probe 已完成；下一步补固定小样本 overfit/更长
+   pilot，并实现可恢复的 base→delta 续训语义。
+4. **受外部环境阻塞：真实 evaluator。** 由用户完成 simulator 环境、资产与许可准备后，
+   先跑 π0.5 的单 public instance、10-step smoke，再跑完整单 instance。
+5. **模型对齐评测。** 两条路线都已达到基础训练/推理门槛；simulator 环境就绪后，两个
+   模型分别跑 public indices 0–9，每次切换模型/checkpoint 必须使用独立输出目录。
+6. **扩展。** 再增加任务、长训、分布式训练和可视化，不让可视化阻塞前五项。
 
 可视化不阻塞前五项；现阶段 evaluator 视频、JSON 和训练曲线足以作为交付证据。

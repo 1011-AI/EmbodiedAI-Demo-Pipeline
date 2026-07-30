@@ -335,6 +335,8 @@ class FastWAMSourceCapabilities:
     shape_compatible_checkpoint: bool
     checkpoint_load_report: bool
     action_expert_only: bool
+    direct_cuda_load: bool
+    low_memory_checkpoint: bool
     ready_for_behavior1k_config: bool
 
     def to_dict(self) -> dict[str, Any]:
@@ -355,12 +357,24 @@ def inspect_fastwam_source(source_root: str | Path) -> FastWAMSourceCapabilities
         root
         / "src/fastwam/datasets/lerobot/lerobot/behavior1k_v3_shards.py"
     )
+    component_loader_path = (
+        root / "src/fastwam/models/wan22/helpers/loader.py"
+    )
+    action_model_path = root / "src/fastwam/models/wan22/action_dit.py"
     model_path = root / "src/fastwam/models/wan22/fastwam.py"
     report_path = (
         root / "src/fastwam/utils/behavior1k_checkpoint_report.py"
     )
     trainer_path = root / "src/fastwam/trainer.py"
-    required = (base_path, video_path, loader_path, model_path, trainer_path)
+    required = (
+        base_path,
+        video_path,
+        loader_path,
+        component_loader_path,
+        action_model_path,
+        model_path,
+        trainer_path,
+    )
     missing = [str(path) for path in required if not path.is_file()]
     if missing:
         raise FastWAMBehaviorContractError(
@@ -370,6 +384,8 @@ def inspect_fastwam_source(source_root: str | Path) -> FastWAMSourceCapabilities
     base_text = base_path.read_text(encoding="utf-8")
     video_text = video_path.read_text(encoding="utf-8")
     loader_text = loader_path.read_text(encoding="utf-8")
+    component_loader_text = component_loader_path.read_text(encoding="utf-8")
+    action_model_text = action_model_path.read_text(encoding="utf-8")
     model_text = model_path.read_text(encoding="utf-8")
     trainer_text = trainer_path.read_text(encoding="utf-8")
     explicit = 'meta.get("lerobot_key")' in base_text
@@ -402,6 +418,24 @@ def inspect_fastwam_source(source_root: str | Path) -> FastWAMSourceCapabilities
         and "behavior1k_checkpoint_report" in model_text
     )
     action_only = "train_action_expert_only" in trainer_text
+    direct_cuda_load = (
+        'FASTWAM_DIRECT_CUDA_LOAD_ENV = "FASTWAM_DIRECT_CUDA_LOAD"'
+        in component_loader_text
+        and "with _direct_model_init(device, torch_dtype):"
+        in component_loader_text
+        and 'FASTWAM_DIRECT_CUDA_LOAD_ENV = "FASTWAM_DIRECT_CUDA_LOAD"'
+        in action_model_text
+        and "with _direct_model_init(device, torch_dtype):" in action_model_text
+        and 'FASTWAM_DIRECT_CUDA_LOAD_ENV = "FASTWAM_DIRECT_CUDA_LOAD"'
+        in model_text
+        and "mmap=direct_cuda" in model_text
+    )
+    low_memory_checkpoint = (
+        'FASTWAM_LOW_MEMORY_CHECKPOINT_ENV = "FASTWAM_LOW_MEMORY_CHECKPOINT"'
+        in model_text
+        and "checkpoint_scope = \"action_delta\"" in model_text
+        and "FASTWAM_LOW_MEMORY_CHECKPOINT" in trainer_text
+    )
     return FastWAMSourceCapabilities(
         source_root=str(root),
         explicit_lerobot_key=explicit,
@@ -411,6 +445,8 @@ def inspect_fastwam_source(source_root: str | Path) -> FastWAMSourceCapabilities
         shape_compatible_checkpoint=shape_compatible,
         checkpoint_load_report=checkpoint_report,
         action_expert_only=action_only,
+        direct_cuda_load=direct_cuda_load,
+        low_memory_checkpoint=low_memory_checkpoint,
         ready_for_behavior1k_config=(
             explicit
             and episode_selection
@@ -419,6 +455,8 @@ def inspect_fastwam_source(source_root: str | Path) -> FastWAMSourceCapabilities
             and shape_compatible
             and checkpoint_report
             and action_only
+            and direct_cuda_load
+            and low_memory_checkpoint
         ),
     )
 
@@ -933,7 +971,25 @@ def copy_checkpoint_report_into_fastwam(source_root: str | Path) -> Path:
 
 
 def patch_checkpoint_load_report(source_root: str | Path) -> bool:
-    """Attach reporting to the overlay's actual shape-compatible load path."""
+    """Attach reporting and the opt-in low-CPU-memory CUDA load path.
+
+    ``FASTWAM_DIRECT_CUDA_LOAD=1`` is intentionally an opt-in runtime switch.
+    The generated FastWAM workspace otherwise retains the pinned upstream
+    construction, checkpoint loading, and checkpoint saving behavior.
+
+    The direct path is needed on GPU containers whose CPU cgroup is smaller
+    than the fp32 host copy of the 5B video expert.  It constructs large modules
+    directly on the selected CUDA device in the requested model dtype, maps
+    checkpoint tensors to that device, and releases checkpoint payloads as soon
+    as callers have loaded them.  Every caller in the pinned runtime ignores
+    ``FastWAM.load_checkpoint``'s return value, so the opt-in path returns only
+    lightweight metadata instead of retaining the full payload.
+
+    ``FASTWAM_LOW_MEMORY_CHECKPOINT=1`` separately writes an action/proprio
+    delta and skips ``Accelerator.save_state``.  This preserves a useful
+    post-training artifact under the same constrained cgroup, while making it
+    explicit that exact optimizer-state resume is unavailable for that run.
+    """
 
     root = Path(source_root).expanduser().resolve()
     path = root / "src/fastwam/models/wan22/fastwam.py"
@@ -941,13 +997,13 @@ def patch_checkpoint_load_report(source_root: str | Path) -> bool:
         raise FastWAMBehaviorContractError(f"missing FastWAM model source: {path}")
     source = path.read_text(encoding="utf-8")
     marker = "write_fastwam_load_report_from_environment"
-    if marker in source:
-        return False
-    before = """    def load_checkpoint(self, path, optimizer=None):
+    changed = False
+    if marker not in source:
+        before = """    def load_checkpoint(self, path, optimizer=None):
         payload = torch.load(path, map_location="cpu")
 
         def _filter_shape_compatible(module, state_dict, module_name):"""
-    after = """    def load_checkpoint(self, path, optimizer=None):
+        after = """    def load_checkpoint(self, path, optimizer=None):
         payload = torch.load(path, map_location="cpu")
         from fastwam.utils.behavior1k_checkpoint_report import (
             write_fastwam_load_report_from_environment,
@@ -955,12 +1011,543 @@ def patch_checkpoint_load_report(source_root: str | Path) -> bool:
         write_fastwam_load_report_from_environment(payload, self, path)
 
         def _filter_shape_compatible(module, state_dict, module_name):"""
-    if source.count(before) != 1:
+        if source.count(before) != 1:
+            raise FastWAMBehaviorContractError(
+                f"cannot safely attach checkpoint report to {path}: load path drift"
+            )
+        path.write_text(source.replace(before, after, 1), encoding="utf-8")
+        changed = True
+
+    return _patch_low_cpu_memory_sources(root) or changed
+
+
+def _patch_low_cpu_memory_sources(root: Path) -> bool:
+    """Patch only exact pinned FastWAM source blocks; refuse source drift."""
+
+    paths = {
+        "loader": root / "src/fastwam/models/wan22/helpers/loader.py",
+        "action": root / "src/fastwam/models/wan22/action_dit.py",
+        "model": root / "src/fastwam/models/wan22/fastwam.py",
+        "trainer": root / "src/fastwam/trainer.py",
+    }
+    missing = [str(path) for path in paths.values() if not path.is_file()]
+    if missing:
         raise FastWAMBehaviorContractError(
-            f"cannot safely attach checkpoint report to {path}: load path drift"
+            f"FastWAM low-memory source patch is incomplete; missing: {missing}"
         )
-    path.write_text(source.replace(before, after, 1), encoding="utf-8")
-    return True
+
+    changed = False
+
+    # Migrate the immediately preceding opt-in patch revision.  It accepted
+    # only the literal value ``1`` while run_config renders YAML booleans as
+    # ``true``/``false``.  Existing generated workspaces may already contain
+    # that revision; normalize it before applying the current exact blocks.
+    old_direct_flag = (
+        'os.environ.get(FASTWAM_DIRECT_CUDA_LOAD_ENV, "0") == "1"'
+    )
+    new_direct_flag = (
+        'os.environ.get(FASTWAM_DIRECT_CUDA_LOAD_ENV, "0").strip().lower()\n'
+        '        in {"1", "true", "yes", "on"}'
+    )
+    old_low_flag = (
+        'return os.environ.get(FASTWAM_LOW_MEMORY_CHECKPOINT_ENV, "0") == "1"'
+    )
+    new_low_flag = """return (
+        os.environ.get(FASTWAM_LOW_MEMORY_CHECKPOINT_ENV, "0").strip().lower()
+        in {"1", "true", "yes", "on"}
+    )"""
+    old_trainer_flag = (
+        '        if os.environ.get("FASTWAM_LOW_MEMORY_CHECKPOINT", "0") == "1":'
+    )
+    new_trainer_flag = """        if os.environ.get("FASTWAM_LOW_MEMORY_CHECKPOINT", "0").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }:"""
+    previous_direct_model_init = '''@contextmanager
+def _direct_model_init(device, torch_dtype):
+    if not _direct_cuda_load_enabled(device):
+        yield
+        return
+    previous_dtype = torch.get_default_dtype()
+    torch.set_default_dtype(torch_dtype)
+    try:
+        with torch.device(device):
+            yield
+    finally:
+        torch.set_default_dtype(previous_dtype)
+'''
+    portable_direct_model_init = '''@contextmanager
+def _direct_model_init(device, torch_dtype):
+    if not _direct_cuda_load_enabled(device):
+        yield
+        return
+    previous_dtype = torch.get_default_dtype()
+    try:
+        try:
+            torch.set_default_dtype(torch_dtype)
+        except TypeError as exc:
+            # PyTorch 2.7.x cannot make bfloat16 the default because it has no
+            # corresponding complex dtype.  Keep float32 as the construction
+            # default in only that known case; the caller's existing .to(...)
+            # still converts the CUDA-resident module to bfloat16 afterwards.
+            if torch_dtype != torch.bfloat16 or "complex" not in str(exc).lower():
+                raise
+        with torch.device(device):
+            yield
+    finally:
+        torch.set_default_dtype(previous_dtype)
+'''
+    helper_end_markers = {
+        "loader": "\n\n@dataclass\nclass Wan22LoadedComponents:",
+        "action": "\n\nclass ActionHead",
+        "model": "\n\nclass FastWAM",
+    }
+    for key in ("loader", "action", "model", "trainer"):
+        path = paths[key]
+        source = path.read_text(encoding="utf-8")
+        normalized = source.replace(old_direct_flag, new_direct_flag)
+        normalized = normalized.replace(old_low_flag, new_low_flag)
+        normalized = normalized.replace(old_trainer_flag, new_trainer_flag)
+        if key in {"loader", "action"}:
+            # Generated workspaces may already contain the previous helper.
+            # Normalize it before the exact patch below so we do not append a
+            # second helper merely because this compatibility behavior changed.
+            normalized = normalized.replace(
+                previous_direct_model_init,
+                portable_direct_model_init,
+            )
+        if key in helper_end_markers:
+            helper_marker = 'FASTWAM_DIRECT_CUDA_LOAD_ENV = "FASTWAM_DIRECT_CUDA_LOAD"'
+            occurrences = [
+                index
+                for index in range(len(normalized))
+                if normalized.startswith(helper_marker, index)
+            ]
+            if len(occurrences) > 2:
+                raise FastWAMBehaviorContractError(
+                    f"cannot safely migrate duplicate low-memory helpers in {path}: "
+                    f"found {len(occurrences)} markers"
+                )
+            if len(occurrences) == 2:
+                duplicate_start = occurrences[1]
+                duplicate_end = normalized.find(
+                    helper_end_markers[key],
+                    duplicate_start,
+                )
+                if duplicate_end < 0:
+                    raise FastWAMBehaviorContractError(
+                        f"cannot safely bound duplicate low-memory helper in {path}"
+                    )
+                normalized = (
+                    normalized[:duplicate_start]
+                    + normalized[duplicate_end:]
+                )
+        if normalized != source:
+            path.write_text(normalized, encoding="utf-8")
+            changed = True
+
+    def patch_file(
+        key: str,
+        replacements: Sequence[tuple[str, str, str]],
+    ) -> None:
+        nonlocal changed
+        path = paths[key]
+        source = path.read_text(encoding="utf-8")
+        file_changed = False
+        for before, after, description in replacements:
+            if after in source:
+                continue
+            count = source.count(before)
+            if count != 1:
+                raise FastWAMBehaviorContractError(
+                    f"cannot safely patch {description} in {path}: "
+                    f"expected one exact source block, found {count}"
+                )
+            source = source.replace(before, after, 1)
+            file_changed = True
+        if file_changed:
+            path.write_text(source, encoding="utf-8")
+            changed = True
+
+    loader_import_before = """from dataclasses import dataclass
+import inspect
+from typing import Any
+
+import torch
+import time
+"""
+    loader_import_after = """from contextlib import contextmanager
+from dataclasses import dataclass
+import gc
+import inspect
+import os
+from typing import Any
+
+import torch
+import time
+"""
+    loader_helper_before = 'SKIPPED_PRETRAIN_SENTINEL = "SKIPPED_PRETRAIN"\n'
+    loader_helper_after = (
+        '''SKIPPED_PRETRAIN_SENTINEL = "SKIPPED_PRETRAIN"
+FASTWAM_DIRECT_CUDA_LOAD_ENV = "FASTWAM_DIRECT_CUDA_LOAD"
+
+
+def _direct_cuda_load_enabled(device) -> bool:
+    return (
+        os.environ.get(FASTWAM_DIRECT_CUDA_LOAD_ENV, "0").strip().lower()
+        in {"1", "true", "yes", "on"}
+        and torch.device(device).type == "cuda"
+    )
+
+
+'''
+        + portable_direct_model_init
+    )
+    loader_registered_before = """    model = model_class(**model_kwargs)
+    state_dict = load_state_dict(path, torch_dtype=torch_dtype, device="cpu")
+    if state_dict_converter is not None:
+        state_dict = state_dict_converter(state_dict)
+
+    model.load_state_dict(state_dict, strict=False)
+    model = model.to(device=device, dtype=torch_dtype)
+    return model
+"""
+    loader_registered_after = """    direct_cuda = _direct_cuda_load_enabled(device)
+    with _direct_model_init(device, torch_dtype):
+        model = model_class(**model_kwargs)
+    state_dict = load_state_dict(
+        path,
+        torch_dtype=torch_dtype,
+        device=device if direct_cuda else "cpu",
+    )
+    if state_dict_converter is not None:
+        state_dict = state_dict_converter(state_dict)
+
+    model.load_state_dict(state_dict, strict=False)
+    del state_dict
+    gc.collect()
+    model = model.to(device=device, dtype=torch_dtype)
+    return model
+"""
+    loader_random_before = (
+        "        dit: WanVideoDiT = "
+        "WanVideoDiT(**validated_dit_config).to(device=device, dtype=torch_dtype)"
+    )
+    loader_random_after = """        with _direct_model_init(device, torch_dtype):
+            dit: WanVideoDiT = WanVideoDiT(**validated_dit_config)
+        dit = dit.to(device=device, dtype=torch_dtype)"""
+    patch_file(
+        "loader",
+        (
+            (loader_import_before, loader_import_after, "direct CUDA loader imports"),
+            (loader_helper_before, loader_helper_after, "direct CUDA loader helper"),
+            (
+                loader_registered_before,
+                loader_registered_after,
+                "direct CUDA registered-model loading",
+            ),
+            (loader_random_before, loader_random_after, "direct CUDA video DiT construction"),
+        ),
+    )
+
+    action_import_before = """import os
+import torch
+import torch.nn as nn
+from typing import Any, Dict, Optional
+"""
+    action_import_after = """from contextlib import contextmanager
+import gc
+import os
+import torch
+import torch.nn as nn
+from typing import Any, Dict, Optional
+"""
+    action_helper_before = "logger = get_logger(__name__)\n"
+    action_helper_after = (
+        '''logger = get_logger(__name__)
+FASTWAM_DIRECT_CUDA_LOAD_ENV = "FASTWAM_DIRECT_CUDA_LOAD"
+
+
+def _direct_cuda_load_enabled(device) -> bool:
+    return (
+        os.environ.get(FASTWAM_DIRECT_CUDA_LOAD_ENV, "0").strip().lower()
+        in {"1", "true", "yes", "on"}
+        and torch.device(device).type == "cuda"
+    )
+
+
+'''
+        + portable_direct_model_init
+    )
+    action_skip_before = '''            logger.info(
+                "Skipping ActionDiT pretrained load (`skip_dit_load_from_pretrain=True`); "
+                "initializing action expert randomly and expecting checkpoint override."
+            )
+            return cls(**action_dit_config).to(device=device, dtype=torch_dtype)'''
+    action_skip_after = '''            logger.info(
+                "Skipping ActionDiT pretrained load (`skip_dit_load_from_pretrain=True`); "
+                "initializing action expert randomly and expecting checkpoint override."
+            )
+            with _direct_model_init(device, torch_dtype):
+                action_expert = cls(**action_dit_config)
+            return action_expert.to(device=device, dtype=torch_dtype)'''
+    action_random_before = (
+        '            logger.info("No `action_dit_pretrained_path` provided, '
+        'initializing ActionDiT with random weights.")\n'
+        "            return cls(**action_dit_config).to(device=device, dtype=torch_dtype)"
+    )
+    action_random_after = (
+        '            logger.info("No `action_dit_pretrained_path` provided, '
+        'initializing ActionDiT with random weights.")\n'
+        "            with _direct_model_init(device, torch_dtype):\n"
+        "                action_expert = cls(**action_dit_config)\n"
+        "            return action_expert.to(device=device, dtype=torch_dtype)"
+    )
+    action_pretrained_before = """        action_cfg = dict(action_dit_config)
+        action_expert = cls(**action_cfg).to(device=device, dtype=torch_dtype)
+        action_state = action_expert.state_dict()
+"""
+    action_pretrained_after = """        action_cfg = dict(action_dit_config)
+        with _direct_model_init(device, torch_dtype):
+            action_expert = cls(**action_cfg)
+        action_expert = action_expert.to(device=device, dtype=torch_dtype)
+        action_state = action_expert.state_dict()
+"""
+    action_payload_before = (
+        '        payload = torch.load(action_dit_pretrained_path, map_location="cpu")'
+    )
+    action_payload_after = """        direct_cuda = _direct_cuda_load_enabled(device)
+        payload = torch.load(
+            action_dit_pretrained_path,
+            map_location=device if direct_cuda else "cpu",
+            mmap=direct_cuda,
+        )"""
+    action_return_before = """        logger.info(
+            "Loaded ActionDiT backbone from %s (keys=%d; random_kept_prefixes=%s).",
+            action_dit_pretrained_path,
+            len(expected_backbone_keys),
+            list(cls.ACTION_BACKBONE_SKIP_PREFIXES),
+        )
+        return action_expert.to(device=device, dtype=torch_dtype)
+"""
+    action_return_after = """        logger.info(
+            "Loaded ActionDiT backbone from %s (keys=%d; random_kept_prefixes=%s).",
+            action_dit_pretrained_path,
+            len(expected_backbone_keys),
+            list(cls.ACTION_BACKBONE_SKIP_PREFIXES),
+        )
+        if direct_cuda:
+            del payload, backbone_state_dict, merged_state, action_state
+            gc.collect()
+        return action_expert.to(device=device, dtype=torch_dtype)
+"""
+    patch_file(
+        "action",
+        (
+            (action_import_before, action_import_after, "direct CUDA ActionDiT imports"),
+            (action_helper_before, action_helper_after, "direct CUDA ActionDiT helper"),
+            (action_skip_before, action_skip_after, "direct CUDA skipped ActionDiT construction"),
+            (action_random_before, action_random_after, "direct CUDA random ActionDiT construction"),
+            (
+                action_pretrained_before,
+                action_pretrained_after,
+                "direct CUDA pretrained ActionDiT construction",
+            ),
+            (action_payload_before, action_payload_after, "direct CUDA ActionDiT payload"),
+            (action_return_before, action_return_after, "ActionDiT payload release"),
+        ),
+    )
+
+    model_import_before = """from typing import Any, Optional, Sequence, Union
+
+import torch
+"""
+    model_import_after = """import gc
+import os
+from typing import Any, Optional, Sequence, Union
+
+import torch
+"""
+    model_helper_before = "logger = get_logger(__name__)\n"
+    model_helper_after = '''logger = get_logger(__name__)
+FASTWAM_DIRECT_CUDA_LOAD_ENV = "FASTWAM_DIRECT_CUDA_LOAD"
+FASTWAM_LOW_MEMORY_CHECKPOINT_ENV = "FASTWAM_LOW_MEMORY_CHECKPOINT"
+
+
+def _direct_cuda_load_enabled(device) -> bool:
+    return (
+        os.environ.get(FASTWAM_DIRECT_CUDA_LOAD_ENV, "0").strip().lower()
+        in {"1", "true", "yes", "on"}
+        and torch.device(device).type == "cuda"
+    )
+
+
+def _low_memory_checkpoint_enabled() -> bool:
+    return (
+        os.environ.get(FASTWAM_LOW_MEMORY_CHECKPOINT_ENV, "0").strip().lower()
+        in {"1", "true", "yes", "on"}
+    )
+'''
+    model_save_before = """    def save_checkpoint(self, path, optimizer=None, step=None):
+        payload = {
+            "mot": self.mot.state_dict(),
+            "step": step,
+            "torch_dtype": str(self.torch_dtype),
+        }
+"""
+    model_save_after = """    def save_checkpoint(self, path, optimizer=None, step=None):
+        mot_state = self.mot.state_dict()
+        checkpoint_scope = "full"
+        if _low_memory_checkpoint_enabled():
+            mot_state = {
+                key: value
+                for key, value in mot_state.items()
+                if key.startswith("mixtures.action.")
+            }
+            checkpoint_scope = "action_delta"
+        payload = {
+            "mot": mot_state,
+            "step": step,
+            "torch_dtype": str(self.torch_dtype),
+            "checkpoint_scope": checkpoint_scope,
+        }
+"""
+    model_load_before = (
+        '    def load_checkpoint(self, path, optimizer=None):\n'
+        '        payload = torch.load(path, map_location="cpu")'
+    )
+    model_load_after = """    def load_checkpoint(self, path, optimizer=None):
+        direct_cuda = _direct_cuda_load_enabled(self.device)
+        payload = torch.load(
+            path,
+            map_location=self.device if direct_cuda else "cpu",
+            mmap=direct_cuda,
+        )"""
+    model_delta_validation_before = """        if "mot" in payload:
+            self.mot.load_state_dict(_filter_shape_compatible(self.mot, payload["mot"], "mot"), strict=False)
+"""
+    model_delta_validation_after = """        if payload.get("checkpoint_scope") == "action_delta":
+            delta_action = payload.get("mot")
+            if not isinstance(delta_action, dict):
+                raise ValueError("action_delta checkpoint requires a `mot` state dict")
+            current_action = {
+                key: value
+                for key, value in self.mot.state_dict().items()
+                if key.startswith("mixtures.action.")
+            }
+            expected_action_keys = set(current_action)
+            provided_action_keys = set(delta_action)
+            if provided_action_keys != expected_action_keys:
+                raise ValueError(
+                    "action_delta action key mismatch: "
+                    f"missing={sorted(expected_action_keys - provided_action_keys)[:10]}, "
+                    f"unexpected={sorted(provided_action_keys - expected_action_keys)[:10]}"
+                )
+            for key, value in delta_action.items():
+                target = current_action[key]
+                if not isinstance(value, torch.Tensor) or tuple(value.shape) != tuple(target.shape):
+                    raise ValueError(
+                        f"action_delta tensor mismatch for {key}: "
+                        f"expected={tuple(target.shape)}, "
+                        f"got={type(value).__name__}:{getattr(value, 'shape', None)}"
+                    )
+            if self.proprio_encoder is None:
+                raise ValueError("action_delta checkpoint requires the current model proprio_encoder")
+            delta_proprio = payload.get("proprio_encoder")
+            if not isinstance(delta_proprio, dict):
+                raise ValueError("action_delta checkpoint requires a `proprio_encoder` state dict")
+            current_proprio = self.proprio_encoder.state_dict()
+            if set(delta_proprio) != set(current_proprio):
+                raise ValueError(
+                    "action_delta proprio key mismatch: "
+                    f"missing={sorted(set(current_proprio) - set(delta_proprio))}, "
+                    f"unexpected={sorted(set(delta_proprio) - set(current_proprio))}"
+                )
+            for key, value in delta_proprio.items():
+                target = current_proprio[key]
+                if not isinstance(value, torch.Tensor) or tuple(value.shape) != tuple(target.shape):
+                    raise ValueError(
+                        f"action_delta proprio tensor mismatch for {key}: "
+                        f"expected={tuple(target.shape)}, "
+                        f"got={type(value).__name__}:{getattr(value, 'shape', None)}"
+                    )
+
+        if "mot" in payload:
+            self.mot.load_state_dict(_filter_shape_compatible(self.mot, payload["mot"], "mot"), strict=False)
+"""
+    model_return_before = """        if optimizer is not None and "optimizer" in payload:
+            optimizer.load_state_dict(payload["optimizer"])
+        return payload
+"""
+    model_return_after = """        if optimizer is not None and "optimizer" in payload:
+            optimizer.load_state_dict(payload["optimizer"])
+        if direct_cuda:
+            result = {
+                "step": payload.get("step"),
+                "checkpoint_scope": payload.get("checkpoint_scope", "full"),
+                "direct_cuda_load": True,
+            }
+            del payload
+            gc.collect()
+            return result
+        return payload
+"""
+    patch_file(
+        "model",
+        (
+            (model_import_before, model_import_after, "direct CUDA FastWAM imports"),
+            (model_helper_before, model_helper_after, "direct CUDA FastWAM helper"),
+            (model_save_before, model_save_after, "low-memory FastWAM delta checkpoint"),
+            (model_load_before, model_load_after, "direct CUDA FastWAM checkpoint load"),
+            (
+                model_delta_validation_before,
+                model_delta_validation_after,
+                "strict action-delta checkpoint validation",
+            ),
+            (model_return_before, model_return_after, "FastWAM checkpoint payload release"),
+        ),
+    )
+
+    trainer_save_before = """        state_path = os.path.join(self.state_dir, step_tag)
+        ensure_dir(state_path)
+        self.accelerator.save_state(output_dir=state_path)
+        if self.accelerator.is_main_process:
+            self._save_trainer_state(state_path)
+        self.accelerator.wait_for_everyone()
+"""
+    trainer_save_after = """        state_path = os.path.join(self.state_dir, step_tag)
+        ensure_dir(state_path)
+        if os.environ.get("FASTWAM_LOW_MEMORY_CHECKPOINT", "0").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }:
+            if self.accelerator.is_main_process:
+                self._save_trainer_state(state_path)
+                logger.warning(
+                    "FASTWAM_LOW_MEMORY_CHECKPOINT=1: saved action/proprio delta only; "
+                    "optimizer/scheduler exact-resume state is intentionally omitted."
+                )
+        else:
+            self.accelerator.save_state(output_dir=state_path)
+            if self.accelerator.is_main_process:
+                self._save_trainer_state(state_path)
+        self.accelerator.wait_for_everyone()
+"""
+    patch_file(
+        "trainer",
+        (
+            (
+                trainer_save_before,
+                trainer_save_after,
+                "low-memory Accelerator checkpoint state",
+            ),
+        ),
+    )
+    return changed
 
 
 def clone_data_config(config: Mapping[str, Any]) -> dict[str, Any]:

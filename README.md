@@ -29,14 +29,18 @@ LeRobotDataset v3
 详细版本、字段映射、检查命令和验收顺序见
 [`docs/BEHAVIOR1K_2026.md`](docs/BEHAVIOR1K_2026.md)。
 
-当前实现边界：
+截至 2026-07-30 的验证边界：
 
-- 已实现并由单元测试覆盖：数据 revision/schema 检查、61D→23D 映射、Task 0 零拷贝视图、统计量生成和 evaluator 协议契约；
-- 已接入但尚待 GPU 实跑：LeRobot π0.5 与 custom FastWAM 的真实训练入口、checkpoint
-  重载和离线推理/加载证据；
-- 尚未声明完成：GPU 上的 loss 下降、模型闭环 rollout、Challenge 成功率；
-- 第一阶段只解码三路 RGB；Depth 保留在源数据中，但不进入训练；
-- 可视化不阻塞训练与评测验收，优先保存 evaluator 原始 JSON/video。
+| 环节 | 状态 | 已取得的证据 | 尚不能声称 |
+|---|---|---|---|
+| Task 0 数据 | 已验证 | `turning_on_radio` 的 200 episodes、429,928 frames 已映射为 23D state/action；真实 loader 可读取三路 RGB | 全部 100 个任务均已训练 |
+| LeRobot π0.5 | 训练/推理链路已验证 | 真实数据 2-step 后训练、delta checkpoint 重载、离线 `[1,32,23]` action chunk、真实样本 WebSocket `float32[23]` 响应均已完成 | 两个 step 不能证明 loss 正常下降、收敛或任务成功 |
+| custom FastWAM | 训练/推理/服务链路已验证 | 真实数据 1-step 后训练得到 loss `0.8314`；约 12 GB release base 与约 2.04 GB action/proprio delta 已按 base→delta 顺序重载；离线输出 finite `float32[32,23]`，真实样本 WebSocket 输出 finite `float32[23]` 且 reset 可重复 | 单个 step 不能证明 loss 正常下降、收敛或任务成功；delta 不能单独用于 trainer resume；未做 simulator rollout |
+| 官方 evaluator | 编排 dry-run 已验证 | BEHAVIOR-1K `v3.9.1`、Task 0 public indices 0–19 的命令与产物/续跑契约已检查 | 未安装完整 simulator 环境/资产，也未完成许可交互，因此没有真实 OmniGibson rollout 或 Challenge 成功率 |
+
+第一阶段只解码三路 RGB；Depth 保留在源数据中但不进入训练。可视化不阻塞训练与评测验收，
+优先保存 evaluator 原始 JSON/video。完整运行记录与下一步见
+[`docs/BEHAVIOR1K_2026.md`](docs/BEHAVIOR1K_2026.md)。
 
 ## 快速开始
 
@@ -95,6 +99,29 @@ python experiments/<route>/<experiment>/run.py
 ```
 
 Make 仅用于创建目录、准备环境、下载/检查资产和代码静态检查。
+
+BEHAVIOR-1K Task 0 的两个真实入口为：
+
+```bash
+# LeRobot π0.5：config.yaml 控制训练参数、模型和 checkpoint。
+python experiments/lerobot/pi05_behavior1k_task0/run.py --dry-run
+python experiments/lerobot/pi05_behavior1k_task0/run.py
+
+# custom FastWAM：先在大内存管理节点生成 stats 和文本缓存。
+export BEHAVIOR1K_DATA_ROOT=/path/to/2026-challenge-demos
+python experiments/custom/fastwam_behavior1k_task0/run.py --prepare-only
+python experiments/custom/fastwam_behavior1k_task0/run.py --precompute-text-embeds
+
+# GPU 节点只读已准备的数据和缓存；先做真实 loader smoke，再训练。
+python experiments/custom/fastwam_behavior1k_task0/run.py --dataset-smoke
+python experiments/custom/fastwam_behavior1k_task0/run.py --dry-run
+python experiments/custom/fastwam_behavior1k_task0/run.py
+```
+
+FastWAM 默认 one-step smoke 已在真实 Task 0 数据上完成，并产出可按 base→delta 顺序加载的
+action/proprio delta。该 delta 已通过离线推理和真实 observation WebSocket 往返，但它只
+是推理就绪的低内存产物，不能单独作为 trainer 的 `resume`；一个 loss 值也不能用来判断
+下降趋势。真实 BEHAVIOR simulator rollout 仍需先完成官方环境、资产和许可准备。
 
 ## 目录结构
 

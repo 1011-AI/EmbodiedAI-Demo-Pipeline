@@ -73,6 +73,7 @@ class FastWAMInferencePaths:
     native_run_dir: str
     config: str
     dataset_stats: str
+    base_checkpoint: str
     checkpoint: str
     source_root: str
 
@@ -152,6 +153,7 @@ def resolve_inference_paths(
     *,
     native_run_dir: str | Path,
     source_root: str | Path,
+    base_checkpoint: str | Path,
     checkpoint: str | Path | None = None,
 ) -> FastWAMInferencePaths:
     native = resolve_native_run_dir(native_run_dir)
@@ -173,14 +175,117 @@ def resolve_inference_paths(
             "FastWAM source does not contain the required pinned BEHAVIOR "
             f"adapter/loader capabilities: {capabilities.to_dict()}"
         )
+    base = Path(base_checkpoint).expanduser().resolve()
+    if not base.is_file():
+        raise FastWAMBehaviorContractError(
+            f"FastWAM base checkpoint not found: {base}"
+        )
     weights = resolve_checkpoint(native, checkpoint)
     return FastWAMInferencePaths(
         native_run_dir=str(native),
         config=str(config),
         dataset_stats=str(stats),
+        base_checkpoint=str(base),
         checkpoint=str(weights),
         source_root=str(source),
     )
+
+
+def validate_model_load_reports(
+    base_report_path: str | Path,
+    trained_report_path: str | Path,
+) -> dict[str, Any]:
+    """Validate the base -> trained-checkpoint load contract after both loads.
+
+    The upstream full-checkpoint loader is intentionally shape-compatible.  A
+    wrong action-only delta can therefore look loadable as a base while leaving
+    the video expert random.  The action delta itself has strict runtime
+    key/shape checks; this complementary report check protects the full/base
+    side and records compact evidence only after both load calls succeed.
+    """
+
+    def read_report(path: str | Path, label: str) -> dict[str, Any]:
+        candidate = Path(path).expanduser().resolve()
+        if not candidate.is_file():
+            raise FastWAMBehaviorContractError(
+                f"{label} checkpoint load report was not written: {candidate}"
+            )
+        payload = json.loads(candidate.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict) or not isinstance(
+            payload.get("summary"), dict
+        ):
+            raise FastWAMBehaviorContractError(
+                f"{label} checkpoint load report is malformed: {candidate}"
+            )
+        return payload
+
+    base = read_report(base_report_path, "base")
+    trained = read_report(trained_report_path, "trained")
+    if base.get("checkpoint_scope", "full") != "full":
+        raise FastWAMBehaviorContractError(
+            "FastWAM base checkpoint must be a full checkpoint, not "
+            f"{base.get('checkpoint_scope')!r}"
+        )
+
+    loaded_base = [str(key) for key in base.get("loaded_keys", [])]
+    video_prefixes = ("mot.mixtures.video.", "video_expert.")
+    if not any(key.startswith(video_prefixes) for key in loaded_base):
+        raise FastWAMBehaviorContractError(
+            "FastWAM base checkpoint did not load any video-expert weights"
+        )
+    unsafe_video = [
+        str(key)
+        for key in base.get("missing_checkpoint_keys", [])
+        if str(key).startswith(video_prefixes)
+    ]
+    unsafe_video.extend(
+        str(item.get("key"))
+        for item in base.get("skipped_shape_mismatch", [])
+        if isinstance(item, Mapping)
+        and str(item.get("key")).startswith(video_prefixes)
+    )
+    if unsafe_video:
+        raise FastWAMBehaviorContractError(
+            "FastWAM base checkpoint leaves video-expert weights uninitialized: "
+            f"{unsafe_video[:10]}"
+        )
+
+    trained_scope = str(trained.get("checkpoint_scope", "full"))
+    if trained_scope not in {"full", "action_delta"}:
+        raise FastWAMBehaviorContractError(
+            f"unsupported FastWAM trained checkpoint scope: {trained_scope!r}"
+        )
+    summary = trained["summary"]
+    unsafe_counts = {
+        key: int(summary.get(key, 0))
+        for key in (
+            "shape_mismatch",
+            "unexpected_checkpoint",
+            "missing_checkpoint",
+            "reinitialized",
+        )
+    }
+    if any(unsafe_counts.values()):
+        raise FastWAMBehaviorContractError(
+            "FastWAM trained checkpoint load report is incomplete: "
+            f"{unsafe_counts}"
+        )
+    if int(summary.get("loaded", 0)) <= 0:
+        raise FastWAMBehaviorContractError(
+            "FastWAM trained checkpoint did not load any parameters"
+        )
+
+    return {
+        "base": {
+            "checkpoint_scope": "full",
+            "summary": dict(base["summary"]),
+        },
+        "trained": {
+            "checkpoint_scope": trained_scope,
+            "summary": dict(summary),
+        },
+        "load_status": "success",
+    }
 
 
 def resolve_dataset_task_spec(
@@ -412,6 +517,7 @@ class FastWAMBehaviorPolicy:
         task_name: str,
         task_instruction: str,
         require_cuda: bool = True,
+        direct_cuda_load: bool = False,
     ) -> None:
         if action_horizon <= 0:
             raise FastWAMBehaviorContractError("action_horizon must be positive")
@@ -542,14 +648,33 @@ class FastWAMBehaviorPolicy:
         # context positions.
         self._task_context_mask = torch.ones_like(task_context_mask)
 
-        self.model = instantiate(cfg.model, model_dtype=dtype, device=device)
-        load_report_path = self.output_dir / "model_load_report.json"
+        base_load_report_path = self.output_dir / "base_model_load_report.json"
+        delta_load_report_path = self.output_dir / "delta_model_load_report.json"
         with _temporary_environment(
-            "FASTWAM_MODEL_LOAD_REPORT",
-            str(load_report_path),
+            "FASTWAM_DIRECT_CUDA_LOAD",
+            "1" if direct_cuda_load else "0",
         ):
-            # This is the pinned overlay's real shape-compatible loader.
-            self.model.load_checkpoint(paths.checkpoint)
+            # The direct-load switch must cover both 5B construction and
+            # release/delta deserialization, not only load_checkpoint().
+            self.model = instantiate(cfg.model, model_dtype=dtype, device=device)
+            with _temporary_environment(
+                "FASTWAM_MODEL_LOAD_REPORT",
+                str(base_load_report_path),
+            ):
+                # Native configs intentionally skip pretrained video DiT
+                # construction.  Restore the release/base model first so an
+                # action-only delta never runs over a random video expert.
+                self.model.load_checkpoint(paths.base_checkpoint)
+            with _temporary_environment(
+                "FASTWAM_MODEL_LOAD_REPORT",
+                str(delta_load_report_path),
+            ):
+                # Then overlay the selected post-training delta/full weights.
+                self.model.load_checkpoint(paths.checkpoint)
+        self.model_load_reports = validate_model_load_reports(
+            base_load_report_path,
+            delta_load_report_path,
+        )
         self.model.eval().to(device)
         model_action_dim = int(self.model.action_expert.action_dim)
         if model_action_dim != ACTION_DIM:
@@ -769,6 +894,7 @@ def run_offline_inference(
         "fastwam_overlay_commit": FASTWAM_OVERLAY_COMMIT,
         "paths": policy.paths.to_dict(),
         "checkpoint_size_bytes": checkpoint.stat().st_size,
+        "model_load_reports": policy.model_load_reports,
         "sample_index": int(sample_index),
         "device": policy.device,
         "action_horizon": policy.action_horizon,

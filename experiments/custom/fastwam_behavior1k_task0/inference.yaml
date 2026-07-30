@@ -29,6 +29,11 @@ paths:
   checkpoint:
   checkpoint_env: FASTWAM_CHECKPOINT
 
+  # action/proprio delta 的基础权重。推理必须先恢复 release/base，再覆盖 delta；
+  # 否则 native config 的 skip_dit_load_from_pretrain 会留下随机 video expert。
+  base_checkpoint: models/custom/fastwam/release/libero_uncond_2cam224.pt
+  base_checkpoint_env: FASTWAM_BASE_CHECKPOINT
+
   # 固定 official FastWAM + realrobot overlay 生成的真实运行树。
   source_root: upstreams/FastWAM-realrobot
   source_root_env: FASTWAM_SOURCE_ROOT
@@ -47,6 +52,10 @@ inference:
   sample_index: 0
   device: cuda:0
   require_cuda: true
+
+  # 与训练端同一 opt-in source patch。必须在构造 5B video expert 与加载
+  # release/delta checkpoint 前生效，否则小 CPU cgroup 会出现宿主内存峰值。
+  direct_cuda_load: true
 
   # FastWAM 一次预测完整 action chunk；扩散步数必须与实验记录一起保存。
   action_horizon: 32

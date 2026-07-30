@@ -165,12 +165,32 @@ def build_fastwam_load_report(
     report["unexpected_checkpoint_keys"].sort()
     report["missing_checkpoint_keys"].sort()
     report["reinitialized_keys"] = sorted(set(report["reinitialized_keys"]))
+    checkpoint_scope = str(
+        checkpoint_payload.get("checkpoint_scope", "full")
+    )
+    report["checkpoint_scope"] = checkpoint_scope
+    report["inherited_from_base_keys"] = []
+    if checkpoint_scope == "action_delta":
+        # The runtime strictly validates that a delta contains the complete
+        # action expert and proprio encoder before loading.  Keys intentionally
+        # absent from that delta are therefore inherited from the base
+        # checkpoint loaded immediately beforehand, not randomly reinitialized.
+        inherited = list(report["missing_checkpoint_keys"])
+        inherited_set = set(inherited)
+        report["inherited_from_base_keys"] = inherited
+        report["missing_checkpoint_keys"] = []
+        report["reinitialized_keys"] = [
+            key
+            for key in report["reinitialized_keys"]
+            if key not in inherited_set
+        ]
     report["summary"] = {
         "loaded": len(report["loaded_keys"]),
         "shape_mismatch": len(report["skipped_shape_mismatch"]),
         "unexpected_checkpoint": len(report["unexpected_checkpoint_keys"]),
         "missing_checkpoint": len(report["missing_checkpoint_keys"]),
         "reinitialized": len(report["reinitialized_keys"]),
+        "inherited_from_base": len(report["inherited_from_base_keys"]),
     }
     return report
 

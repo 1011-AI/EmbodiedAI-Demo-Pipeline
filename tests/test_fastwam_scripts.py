@@ -4,7 +4,10 @@ import json
 import os
 from pathlib import Path
 
+import pytest
+
 from scripts.fastwam.parse_train_log import write_summary
+from scripts.fastwam.run_config import build_env
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -59,6 +62,11 @@ def test_fastwam_runner_refuses_cpu_fallback_and_wraps_train_zero1() -> None:
     assert "PYTHONWARNINGS" in runner
     assert "FASTWAM_ALLOW_UNSUPPORTED_GPU_ARCH" in runner
     assert "torch.cuda.get_arch_list()" in runner
+    assert 'FASTWAM_DIRECT_CUDA_LOAD="${FASTWAM_DIRECT_CUDA_LOAD:-0}"' in runner
+    assert (
+        'FASTWAM_LOW_MEMORY_CHECKPOINT="${FASTWAM_LOW_MEMORY_CHECKPOINT:-0}"'
+        in runner
+    )
 
 
 def test_fastwam_yaml_runner_renders_single8_config(tmp_path: Path) -> None:
@@ -179,7 +187,31 @@ def test_fastwam_behavior_config_auto_detects_platform_gpu_count(
         check=True,
     )
 
-    assert "export FASTWAM_GPUS_PER_NODE=4" in generated.read_text(encoding="utf-8")
+    rendered = generated.read_text(encoding="utf-8")
+    assert "export FASTWAM_GPUS_PER_NODE=4" in rendered
+    assert "export FASTWAM_DIRECT_CUDA_LOAD=true" in rendered
+    assert "export FASTWAM_LOW_MEMORY_CHECKPOINT=true" in rendered
+
+
+def test_fastwam_low_memory_checkpoint_requires_action_only_override(
+) -> None:
+    config = {
+        "experiment": {"name": "unsafe_delta"},
+        "paths": {},
+        "distributed": {"gpus_per_node": 1},
+        "fastwam": {
+            "low_memory_checkpoint": True,
+            "extra_overrides": ["train_action_expert_only=false"],
+        },
+        "mode": {},
+    }
+
+    with pytest.raises(SystemExit, match="train_action_expert_only=true"):
+        build_env(
+            config,
+            ROOT,
+            ROOT / "experiments/custom/unsafe_delta/config.yaml",
+        )
 
 
 def test_fastwam_release_download_script_tracks_public_artifacts() -> None:

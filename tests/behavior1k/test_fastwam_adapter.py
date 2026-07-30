@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
+import os
 from pathlib import Path
 
 import numpy as np
@@ -264,15 +266,106 @@ def _write_fastwam_source_fixture(root: Path) -> None:
         )
         + "\n",
         "src/fastwam/models/wan22/fastwam.py": (
+            "from typing import Any, Optional, Sequence, Union\n"
+            "\n"
+            "import torch\n"
+            "\n"
+            "logger = get_logger(__name__)\n"
+            "\n"
             "class FastWAM:\n"
+            "    def save_checkpoint(self, path, optimizer=None, step=None):\n"
+            "        payload = {\n"
+            '            "mot": self.mot.state_dict(),\n'
+            '            "step": step,\n'
+            '            "torch_dtype": str(self.torch_dtype),\n'
+            "        }\n"
+            '        torch.save(payload, path)\n'
+            "\n"
             "    def load_checkpoint(self, path, optimizer=None):\n"
             '        payload = torch.load(path, map_location="cpu")\n'
             "\n"
             "        def _filter_shape_compatible(module, state_dict, module_name):\n"
             '            logger.warning("Skipping %d shape-mismatched")\n'
-            "        self.mot.load_state_dict({}, strict=False)\n"
+            '        if "mot" in payload:\n'
+            '            self.mot.load_state_dict(_filter_shape_compatible(self.mot, payload["mot"], "mot"), strict=False)\n'
+            '        if optimizer is not None and "optimizer" in payload:\n'
+            '            optimizer.load_state_dict(payload["optimizer"])\n'
+            "        return payload\n"
         ),
-        "src/fastwam/trainer.py": "train_action_expert_only = True\n",
+        "src/fastwam/models/wan22/helpers/loader.py": (
+            "from dataclasses import dataclass\n"
+            "import inspect\n"
+            "from typing import Any\n"
+            "\n"
+            "import torch\n"
+            "import time\n"
+            "\n"
+            'SKIPPED_PRETRAIN_SENTINEL = "SKIPPED_PRETRAIN"\n'
+            "\n"
+            "def _load_registered_model(path, model_name, torch_dtype, device):\n"
+            "    model = model_class(**model_kwargs)\n"
+            '    state_dict = load_state_dict(path, torch_dtype=torch_dtype, device="cpu")\n'
+            "    if state_dict_converter is not None:\n"
+            "        state_dict = state_dict_converter(state_dict)\n"
+            "\n"
+            "    model.load_state_dict(state_dict, strict=False)\n"
+            "    model = model.to(device=device, dtype=torch_dtype)\n"
+            "    return model\n"
+            "\n"
+            "def load_components():\n"
+            "    if skip_dit_load_from_pretrain:\n"
+            '        logger.info("skip")\n'
+            "        dit: WanVideoDiT = WanVideoDiT(**validated_dit_config).to(device=device, dtype=torch_dtype)\n"
+        ),
+        "src/fastwam/models/wan22/action_dit.py": (
+            "import os\n"
+            "import torch\n"
+            "import torch.nn as nn\n"
+            "from typing import Any, Dict, Optional\n"
+            "\n"
+            "logger = get_logger(__name__)\n"
+            "\n"
+            "class ActionDiT:\n"
+            "    def from_pretrained():\n"
+            "        if skip_dit_load_from_pretrain:\n"
+            "            logger.info(\n"
+            '                "Skipping ActionDiT pretrained load (`skip_dit_load_from_pretrain=True`); "\n'
+            '                "initializing action expert randomly and expecting checkpoint override."\n'
+            "            )\n"
+            "            return cls(**action_dit_config).to(device=device, dtype=torch_dtype)\n"
+            "        if not action_dit_pretrained_path:\n"
+            '            logger.info("No `action_dit_pretrained_path` provided, initializing ActionDiT with random weights.")\n'
+            "            return cls(**action_dit_config).to(device=device, dtype=torch_dtype)\n"
+            "\n"
+            "        action_cfg = dict(action_dit_config)\n"
+            "        action_expert = cls(**action_cfg).to(device=device, dtype=torch_dtype)\n"
+            "        action_state = action_expert.state_dict()\n"
+            "        expected_backbone_keys = cls.backbone_key_set(action_state.keys())\n"
+            "\n"
+            '        payload = torch.load(action_dit_pretrained_path, map_location="cpu")\n'
+            "        backbone_state_dict = payload.get(\"backbone_state_dict\")\n"
+            "        merged_state = dict(action_state)\n"
+            "        action_expert.load_state_dict(merged_state, strict=True)\n"
+            "        logger.info(\n"
+            '            "Loaded ActionDiT backbone from %s (keys=%d; random_kept_prefixes=%s).",\n'
+            "            action_dit_pretrained_path,\n"
+            "            len(expected_backbone_keys),\n"
+            "            list(cls.ACTION_BACKBONE_SKIP_PREFIXES),\n"
+            "        )\n"
+            "        return action_expert.to(device=device, dtype=torch_dtype)\n"
+        ),
+        "src/fastwam/trainer.py": (
+            "import os\n"
+            "train_action_expert_only = True\n"
+            "\n"
+            "def save_checkpoint(self):\n"
+            "        state_path = os.path.join(self.state_dir, step_tag)\n"
+            "        ensure_dir(state_path)\n"
+            "        self.accelerator.save_state(output_dir=state_path)\n"
+            "        if self.accelerator.is_main_process:\n"
+            "            self._save_trainer_state(state_path)\n"
+            "        self.accelerator.wait_for_everyone()\n"
+        ),
     }
     for relative, text in files.items():
         path = root / relative
@@ -308,7 +401,36 @@ def test_explicit_lerobot_key_patch_is_source_checked_and_idempotent(tmp_path: P
     assert report_changed_again is False
     assert after.explicit_lerobot_key is True
     assert after.lerobot_v3_shards is True
+    assert after.direct_cuda_load is True
+    assert after.low_memory_checkpoint is True
     assert after.ready_for_behavior1k_config is True
+    model_loader = (
+        tmp_path / "src/fastwam/models/wan22/helpers/loader.py"
+    ).read_text(encoding="utf-8")
+    action_loader = (
+        tmp_path / "src/fastwam/models/wan22/action_dit.py"
+    ).read_text(encoding="utf-8")
+    model = (
+        tmp_path / "src/fastwam/models/wan22/fastwam.py"
+    ).read_text(encoding="utf-8")
+    trainer = (
+        tmp_path / "src/fastwam/trainer.py"
+    ).read_text(encoding="utf-8")
+    assert 'FASTWAM_DIRECT_CUDA_LOAD_ENV = "FASTWAM_DIRECT_CUDA_LOAD"' in model_loader
+    assert 'in {"1", "true", "yes", "on"}' in model_loader
+    assert "PyTorch 2.7.x cannot make bfloat16 the default" in model_loader
+    assert 'torch_dtype != torch.bfloat16 or "complex" not in str(exc).lower()' in model_loader
+    assert 'FASTWAM_DIRECT_CUDA_LOAD_ENV = "FASTWAM_DIRECT_CUDA_LOAD"' in action_loader
+    assert 'in {"1", "true", "yes", "on"}' in action_loader
+    assert "PyTorch 2.7.x cannot make bfloat16 the default" in action_loader
+    assert 'FASTWAM_LOW_MEMORY_CHECKPOINT_ENV = "FASTWAM_LOW_MEMORY_CHECKPOINT"' in model
+    assert "del payload" in model
+    assert "mmap=direct_cuda" in model
+    assert 'in {"1", "true", "yes", "on"}' in model
+    assert 'payload.get("checkpoint_scope") == "action_delta"' in model
+    assert "provided_action_keys != expected_action_keys" in model
+    assert "action_delta proprio key mismatch" in model
+    assert '"true",' in trainer
     loader = (
         tmp_path
         / "src/fastwam/datasets/lerobot/lerobot/lerobot_dataset.py"
@@ -316,6 +438,96 @@ def test_explicit_lerobot_key_patch_is_source_checked_and_idempotent(tmp_path: P
     assert "def _stack_hf_column(values):" in loader
     assert loader.count("_stack_hf_column(") == 5
     assert "disabled.  Do not" in loader
+
+    # A partially patched generated tree must never be advertised as ready:
+    # action construction would otherwise retain the high-host-memory path.
+    action_path = tmp_path / "src/fastwam/models/wan22/action_dit.py"
+    action_path.write_text(
+        action_loader.replace(
+            'FASTWAM_DIRECT_CUDA_LOAD_ENV = "FASTWAM_DIRECT_CUDA_LOAD"',
+            'FASTWAM_DIRECT_CUDA_LOAD_ENV = "PARTIAL_PATCH"',
+            1,
+        ),
+        encoding="utf-8",
+    )
+    partial = inspect_fastwam_source(tmp_path)
+    assert partial.direct_cuda_load is False
+    assert partial.ready_for_behavior1k_config is False
+
+
+def test_direct_cuda_helper_falls_back_only_for_pytorch27_bfloat16_complex_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The generated helper must keep CUDA construction on older PyTorch.
+
+    PyTorch 2.7.x raises while selecting bfloat16 as the global default because
+    it cannot select a matching complex dtype.  The large module should still
+    be constructed under the CUDA device context, with the previous float32
+    default, and converted by the caller's existing ``.to(..., bfloat16)``.
+    """
+
+    _write_fastwam_source_fixture(tmp_path)
+    patch_checkpoint_load_report(tmp_path)
+    loader_source = (
+        tmp_path / "src/fastwam/models/wan22/helpers/loader.py"
+    ).read_text(encoding="utf-8")
+    helper_source = loader_source[
+        loader_source.index('FASTWAM_DIRECT_CUDA_LOAD_ENV = "FASTWAM_DIRECT_CUDA_LOAD"') :
+        loader_source.index("\ndef _load_registered_model")
+    ]
+
+    class FakeDevice:
+        type = "cuda"
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            return False
+
+    class FakeTorch:
+        bfloat16 = object()
+
+        def __init__(self) -> None:
+            self.default_dtype = "float32"
+            self.set_calls: list[object] = []
+            self.device_enters = 0
+
+        def device(self, value):
+            owner = self
+
+            class CountingDevice(FakeDevice):
+                def __enter__(self):
+                    owner.device_enters += 1
+                    return super().__enter__()
+
+            return CountingDevice()
+
+        def get_default_dtype(self):
+            return self.default_dtype
+
+        def set_default_dtype(self, value):
+            self.set_calls.append(value)
+            if value is self.bfloat16:
+                raise TypeError("invalid default scalar type for complex")
+            self.default_dtype = value
+
+    fake_torch = FakeTorch()
+    namespace = {
+        "contextmanager": contextmanager,
+        "os": os,
+        "torch": fake_torch,
+    }
+    exec(compile(helper_source, "<generated-direct-cuda-helper>", "exec"), namespace)
+    monkeypatch.setenv("FASTWAM_DIRECT_CUDA_LOAD", "true")
+
+    with namespace["_direct_model_init"]("cuda:0", fake_torch.bfloat16):
+        assert fake_torch.default_dtype == "float32"
+
+    assert fake_torch.device_enters == 1
+    assert fake_torch.set_calls == [fake_torch.bfloat16, "float32"]
+    assert fake_torch.default_dtype == "float32"
 
 
 class _FakeTensor:
@@ -375,6 +587,7 @@ def test_fastwam_load_report_marks_real_7d_to_23d_heads_reinitialized() -> None:
         "unexpected_checkpoint": 0,
         "missing_checkpoint": 0,
         "reinitialized": 4,
+        "inherited_from_base": 0,
     }
     assert report["reinitialized_keys"] == [
         "mot.mixtures.action.action_encoder.weight",
@@ -382,6 +595,35 @@ def test_fastwam_load_report_marks_real_7d_to_23d_heads_reinitialized() -> None:
         "mot.mixtures.action.head.weight",
         "proprio_encoder.weight",
     ]
+
+
+def test_fastwam_delta_report_marks_omitted_video_as_inherited() -> None:
+    model = _FakeFastWAM()
+    model.mot = _FakeModule(
+        {
+            **model.mot.state_dict(),
+            "mixtures.video.blocks.0.weight": _FakeTensor(1024, 1024),
+        }
+    )
+    payload = {
+        "checkpoint_scope": "action_delta",
+        "mot": {
+            key: value
+            for key, value in model.mot.state_dict().items()
+            if key.startswith("mixtures.action.")
+        },
+        "proprio_encoder": model.proprio_encoder.state_dict(),
+    }
+
+    report = build_fastwam_load_report(payload, model)
+
+    assert report["checkpoint_scope"] == "action_delta"
+    assert report["missing_checkpoint_keys"] == []
+    assert report["reinitialized_keys"] == []
+    assert report["inherited_from_base_keys"] == [
+        "mot.mixtures.video.blocks.0.weight"
+    ]
+    assert report["summary"]["inherited_from_base"] == 1
 
 
 def test_real_load_hook_writes_rank0_report_to_run_directory(
