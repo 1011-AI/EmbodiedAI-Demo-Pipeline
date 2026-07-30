@@ -1,14 +1,15 @@
-ARG CUDA_BASE_IMAGE=nvcr.io/nvidia/cuda:12.8.1-devel-ubuntu24.04
+ARG CUDA_BASE_IMAGE=nvidia/cuda:12.8.1-devel-ubuntu24.04
 FROM ${CUDA_BASE_IMAGE} AS os-base
 
 LABEL io.training-platform.dev-compatible="true"
 
 ARG DEBIAN_FRONTEND=noninteractive
 ARG MINICONDA_SHA256=ecb43ee4ae30a7a5af87737e9548ceb21f0a10ec55b8dc40d247aa925b80bfec
-ARG MINICONDA_URL=https://mirrors.tuna.tsinghua.edu.cn/anaconda/miniconda/Miniconda3-py312_26.5.3-1-Linux-x86_64.sh
+ARG ANACONDA_BASE_URL=https://mirrors.pku.edu.cn/anaconda
+ARG MINICONDA_URL=${ANACONDA_BASE_URL}/miniconda/Miniconda3-py312_26.5.3-1-Linux-x86_64.sh
 ARG TARGETARCH
-ARG UBUNTU_MIRROR=http://mirrors.aliyun.com/ubuntu
-ARG PYPI_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
+ARG UBUNTU_MIRROR=http://mirrors.pku.edu.cn/ubuntu
+ARG PYPI_INDEX_URL=https://mirrors.pku.edu.cn/pypi/simple/
 
 ENV CONDA_DIR=/opt/conda \
     LANG=C.UTF-8 \
@@ -46,6 +47,8 @@ RUN rm -f /etc/apt/sources.list.d/cuda*.list \
       openssh-server \
       rsync \
       unzip \
+      vim \
+      ripgrep \
     && rm -rf /var/lib/apt/lists/* \
     && git lfs install --system \
     && install -d -m 0755 /run/sshd \
@@ -62,7 +65,12 @@ RUN rm -f /etc/apt/sources.list.d/cuda*.list \
     && if [ "${TARGETARCH:-amd64}" != "amd64" ]; then \
          echo "This image currently supports linux/amd64 only" >&2; exit 2; \
        fi \
-    && curl -fL --retry 5 -o /tmp/miniconda.sh "${MINICONDA_URL}" \
+    && sed -i \
+      's|^Subsystem[[:space:]][[:space:]]*sftp[[:space:]].*$|Subsystem sftp internal-sftp|' \
+      /etc/ssh/sshd_config \
+    && /usr/sbin/sshd -t
+
+RUN curl -fL --retry 5 -o /tmp/miniconda.sh "${MINICONDA_URL}" \
     && echo "${MINICONDA_SHA256}  /tmp/miniconda.sh" | sha256sum -c - \
     && bash /tmp/miniconda.sh -b -p "${CONDA_DIR}" \
     && rm -f /tmp/miniconda.sh \
@@ -71,17 +79,12 @@ RUN rm -f /etc/apt/sources.list.d/cuda*.list \
       '  - defaults' \
       'show_channel_urls: true' \
       'default_channels:' \
-      '  - https://mirrors.tuna.tsinghua.edu.cn/anaconda/pkgs/main' \
-      '  - https://mirrors.tuna.tsinghua.edu.cn/anaconda/pkgs/r' \
+      '  - ${ANACONDA_BASE_URL}/pkgs/main' \
+      '  - ${ANACONDA_BASE_URL}/pkgs/r' \
       'custom_channels:' \
-      '  conda-forge: https://mirrors.tuna.tsinghua.edu.cn/anaconda/cloud' \
+      '  conda-forge: ${ANACONDA_BASE_URL}/cloud' \
       > "${CONDA_DIR}/.condarc" \
     && python3 -c 'import sys; assert sys.version_info[:2] == (3, 12), sys.version'
-
-RUN sed -i \
-      's|^Subsystem[[:space:]][[:space:]]*sftp[[:space:]].*$|Subsystem sftp internal-sftp|' \
-      /etc/ssh/sshd_config \
-    && /usr/sbin/sshd -t
 
 COPY --chmod=0644 <<'EOF' /etc/embodied-ai/paths.txt
 EmbodiedAI container paths
@@ -124,6 +127,8 @@ WORKDIR /root
 
 FROM os-base AS core
 
+
+ARG PYPI_INDEX_URL=https://mirrors.ustc.edu.cn/pypi/simple/
 RUN mkdir -p /opt/embodied-ai-dependencies /opt/venvs \
     && python3 -m venv /opt/venvs/core \
     && /opt/venvs/core/bin/python -m pip install --upgrade pip setuptools wheel \
@@ -135,7 +140,6 @@ RUN mkdir -p /opt/embodied-ai-dependencies /opt/venvs \
 
 FROM core AS cuda-base
 
-ARG CUDA_PYPI_INDEX_URL=https://mirrors.aliyun.com/pypi/simple
 ARG PYTORCH_FIND_LINKS=https://mirrors.aliyun.com/pytorch-wheels/cu128/
 
 # Media, rendering and compiler packages are needed only by the GPU research
@@ -178,30 +182,21 @@ ENV CC=/usr/bin/gcc \
 # Generic and NVIDIA dependencies come from the configured domestic PyPI mirror;
 # PyTorch's cu128 wheels come from Aliyun's domestic PyTorch wheel mirror.
 RUN python3 -m pip install --break-system-packages \
-      --index-url "${CUDA_PYPI_INDEX_URL}" uv \
+      --index-url "${PIP_INDEX_URL}" uv \
     && uv pip install --system --break-system-packages --no-cache \
-      --index-url "${CUDA_PYPI_INDEX_URL}" \
+      --index-url "${PIP_INDEX_URL}" \
       filelock \
       fsspec \
       jinja2 \
       networkx \
       numpy \
-      "nvidia-cublas-cu12==12.8.3.14" \
-      "nvidia-cuda-cupti-cu12==12.8.57" \
-      "nvidia-cuda-nvrtc-cu12==12.8.61" \
-      "nvidia-cuda-runtime-cu12==12.8.57" \
+      "cuda-toolkit[cublas,cudart,cufft,cufile,cupti,curand,cusolver,cusparse,nvjitlink,nvrtc,nvtx]==12.8.0" \
       "nvidia-cudnn-cu12==9.7.1.26" \
-      "nvidia-cufft-cu12==11.3.3.41" \
-      "nvidia-cufile-cu12==1.13.0.11" \
-      "nvidia-curand-cu12==10.3.9.55" \
-      "nvidia-cusolver-cu12==11.7.2.55" \
-      "nvidia-cusparse-cu12==12.5.7.53" \
       "nvidia-cusparselt-cu12==0.6.3" \
       "nvidia-nccl-cu12==2.26.2" \
-      "nvidia-nvjitlink-cu12==12.8.61" \
-      "nvidia-nvtx-cu12==12.8.55" \
       pillow \
       "sympy>=1.13.3" \
+      "torchcodec==0.5" \
       "triton==3.3.1" \
       "typing-extensions>=4.10.0" \
     && uv pip install --system --break-system-packages --no-cache --no-deps \
@@ -214,20 +209,18 @@ import torchvision
 assert torch.version.cuda == "12.8", torch.version.cuda
 print(f"torch={torch.__version__} torchvision={torchvision.__version__} cuda={torch.version.cuda}")
 PY
+RUN python3 -m pip check
 
 FROM cuda-base AS lerobot
 
-ARG GPU_PYPI_INDEX_URL=https://mirrors.aliyun.com/pypi/simple
-ARG GPU_PYPI_FALLBACK_URL=https://pypi.tuna.tsinghua.edu.cn/simple
 ARG LEROBOT_REF=e40b58a8dfa9e7b86918c374791599d070518d11
-ENV PIP_INDEX_URL=${GPU_PYPI_INDEX_URL}
 
 RUN python3 -m venv --system-site-packages /opt/venvs/lerobot \
     && /opt/venvs/lerobot/bin/python -m pip install --upgrade pip setuptools wheel
 
 RUN --mount=type=bind,source=scripts/lerobot/install_lerobot_cluster.sh,target=/tmp/install_lerobot_cluster.sh,ro \
     /opt/venvs/lerobot/bin/python -m pip install \
-      --index-url "${GPU_PYPI_FALLBACK_URL}" "num2words==0.5.14" \
+      --index-url "${PIP_INDEX_URL}" "num2words==0.5.14" \
     && PATH=/opt/venvs/lerobot/bin:${PATH} \
     LEROBOT_REF=${LEROBOT_REF} \
     LEROBOT_SOURCE_DIR=/opt/embodied-ai-dependencies/lerobot \
@@ -283,10 +276,10 @@ RUN python3 -m venv --system-site-packages /opt/venvs/imagewam \
       > /opt/libero-config/config.yaml
 
 RUN /opt/venvs/core/bin/python -c "import pydantic, pytest, yaml" \
-    && /opt/venvs/lerobot/bin/python -c "import diffusers, lerobot, lerobot.scripts.lerobot_train" \
+    && /opt/venvs/lerobot/bin/python -c "import diffusers, lerobot, lerobot.scripts.lerobot_train; from torchcodec.decoders import VideoDecoder" \
     && LIBERO_CONFIG_PATH=/opt/libero-config \
       PYTHONPATH=/opt/embodied-ai-dependencies/ImageWAM/third_party/LIBERO \
-      /opt/venvs/imagewam/bin/python -c "import imagewam, libero.libero"
+      /opt/venvs/imagewam/bin/python -c "import imagewam, libero.libero; from torchcodec.decoders import VideoDecoder"
 
 ENV DEPENDENCY_ROOT=/opt/embodied-ai-dependencies \
     HF_ENDPOINT=https://hf-mirror.com \
