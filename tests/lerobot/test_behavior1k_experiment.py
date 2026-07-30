@@ -44,6 +44,8 @@ def test_train_command_uses_real_behavior_adapter_and_yaml_values(tmp_path: Path
     assert "--dataset.use_imagenet_stats=false" in command
     assert "--steps=2" in command
     assert "--save_checkpoint=true" in command
+    assert "--policy.train_expert_only=true" in command
+    assert "--num_workers=0" in command
 
 
 def test_infer_command_uses_real_checkpoint_inference_module(tmp_path: Path) -> None:
@@ -88,3 +90,4 @@ def test_runtime_enables_direct_cuda_checkpoint_loading(
     environment = runner.build_environment(config, tmp_path)
 
     assert environment["BEHAVIOR1K_PI05_DIRECT_CUDA_LOAD"] == "1"
+    assert environment["BEHAVIOR1K_PI05_DELTA_CHECKPOINT"] == "1"

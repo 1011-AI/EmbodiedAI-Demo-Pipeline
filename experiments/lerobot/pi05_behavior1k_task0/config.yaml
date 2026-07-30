@@ -50,7 +50,9 @@ policy:
   # 短探针关闭 compile，避免首次编译时间掩盖真实数据/模型错误。
   compile_model: false
   gradient_checkpointing: true
-  train_expert_only: false
+  # 当前 16 GB cgroup 下采用 action expert 后训练；PaliGemma VLM 冻结但仍参与
+  # 前向，训练的是真实 π0.5 action expert，不是 mock。
+  train_expert_only: true
   push_to_hub: false
 
 training:
@@ -58,7 +60,9 @@ training:
   # 收窄到一个 episode，并将 steps 提高到 20-100。
   steps: 2
   batch_size: 1
-  num_workers: 4
+  # 当前容器与其他任务共享 16 GB cgroup。worker=0 避免四个视频 worker 在
+  # checkpoint 阶段占用数 GB RSS；大内存独占实例可改回 4-8。
+  num_workers: 0
   prefetch_factor: 2
   persistent_workers: true
   log_freq: 1
@@ -97,3 +101,7 @@ runtime:
   # 容器内存限制较小时会在使用 GPU 前被 OOM kill。开启后，模型参数和权重
   # 直接落到 Accelerate 为当前 rank 选择的 CUDA device；不修改上游源码。
   direct_cuda_load: true
+
+  # 只保存 train_expert_only 的真实可训练参数，并在推理时叠加到固定 base。
+  # 这是可推理 checkpoint，不包含 optimizer/RNG，不能用于断点续训。
+  delta_checkpoint: true

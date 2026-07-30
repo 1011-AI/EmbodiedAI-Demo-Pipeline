@@ -219,6 +219,10 @@ download-lerobot-pi05-runtime-cache:
 	  --include "tokenizer*" \
 	  --include "special_tokens_map.json" \
 	  --include "added_tokens.json"
+	@CACHE_ROOT="$${HUGGINGFACE_HUB_CACHE:-$${HF_HOME:-$$(pwd)/hf_cache}/hub}/models--google--paligemma-3b-pt-224"; \
+	mkdir -p "$$CACHE_ROOT/refs"; \
+	printf "%s" "35e4f46485b4d07967e7e9935bc3786aad50687c" > "$$CACHE_ROOT/refs/main"; \
+	echo "[cache-ref] $$CACHE_ROOT/refs/main"
 
 download-lerobot-fastwam-libero-policy:
 	DOWNLOAD_LEROBOT_DATASET=0 DOWNLOAD_LEROBOT_POLICY=1 \

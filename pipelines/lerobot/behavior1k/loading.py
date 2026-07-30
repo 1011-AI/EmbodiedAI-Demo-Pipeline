@@ -12,13 +12,16 @@ from __future__ import annotations
 
 import contextlib
 import io
+import json
 import os
 import sys
 from collections.abc import Callable, MutableMapping
 from functools import wraps
+from pathlib import Path
 from typing import Any
 
 from .adapter import BehaviorLeRobotAdapterError
+from .checkpoint import DELTA_MANIFEST
 
 DIRECT_CUDA_LOAD_ENV = "BEHAVIOR1K_PI05_DIRECT_CUDA_LOAD"
 _TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
@@ -118,6 +121,48 @@ def _call_with_load_guard(call: Callable[[], Any]) -> Any:
     return policy
 
 
+def _find_project_root(start: Path) -> Path:
+    for candidate in (start, *start.parents):
+        if (candidate / "pyproject.toml").is_file():
+            return candidate
+    return Path.cwd().resolve()
+
+
+def _load_delta_manifest(pretrained_path: Any) -> tuple[Path, dict[str, Any]] | None:
+    checkpoint_dir = Path(str(pretrained_path)).expanduser().resolve()
+    manifest_path = checkpoint_dir / DELTA_MANIFEST
+    if not manifest_path.is_file():
+        return None
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise BehaviorLeRobotAdapterError(
+            f"cannot read PI0.5 delta checkpoint manifest {manifest_path}: {exc}"
+        ) from exc
+    if manifest.get("format") != "pi05_trainable_delta_v1":
+        raise BehaviorLeRobotAdapterError(
+            f"unsupported PI0.5 delta checkpoint format in {manifest_path}"
+        )
+    return checkpoint_dir, manifest
+
+
+def _resolve_delta_base(checkpoint_dir: Path, manifest: dict[str, Any]) -> Path:
+    raw_base = manifest.get("base_pretrained_path")
+    if not raw_base:
+        raise BehaviorLeRobotAdapterError(
+            "PI0.5 delta checkpoint has no base_pretrained_path"
+        )
+    base_path = Path(str(raw_base)).expanduser()
+    if not base_path.is_absolute():
+        base_path = _find_project_root(checkpoint_dir) / base_path
+    base_path = base_path.resolve()
+    if not (base_path / "model.safetensors").is_file():
+        raise BehaviorLeRobotAdapterError(
+            f"PI0.5 delta base checkpoint is unavailable: {base_path}"
+        )
+    return base_path
+
+
 def make_policy_with_memory_strategy(
     upstream_make_policy: Callable[..., Any],
     *,
@@ -136,6 +181,16 @@ def make_policy_with_memory_strategy(
 
     policy_type = str(getattr(cfg, "type", ""))
     pretrained_path = getattr(cfg, "pretrained_path", None)
+    delta_checkpoint = (
+        _load_delta_manifest(pretrained_path)
+        if policy_type == "pi05" and pretrained_path
+        else None
+    )
+    requested_pretrained_path = pretrained_path
+    if delta_checkpoint is not None:
+        checkpoint_dir, delta_manifest = delta_checkpoint
+        pretrained_path = _resolve_delta_base(checkpoint_dir, delta_manifest)
+        cfg.pretrained_path = pretrained_path
     configured_device = str(getattr(cfg, "device", ""))
     enabled = (
         direct_cuda_load_requested()
@@ -153,11 +208,12 @@ def make_policy_with_memory_strategy(
 
     is_pretrained_pi05 = policy_type == "pi05" and bool(pretrained_path)
     if not enabled:
-        return (
-            _call_with_load_guard(create_policy)
-            if is_pretrained_pi05
-            else create_policy()
-        )
+        if delta_checkpoint is not None:
+            cfg.pretrained_path = requested_pretrained_path
+            raise BehaviorLeRobotAdapterError(
+                "PI0.5 delta checkpoints require direct_cuda_load=true"
+            )
+        return _call_with_load_guard(create_policy) if is_pretrained_pi05 else create_policy()
 
     torch_module, safetensors_torch = _load_runtime_modules()
     target_device = _target_cuda_device(torch_module, configured_device)
@@ -181,6 +237,41 @@ def make_policy_with_memory_strategy(
             torch_module.cuda.device(target_device),
             torch_module.device(target_device),
         ):
-            return _call_with_load_guard(create_policy)
+            policy = _call_with_load_guard(create_policy)
+            if delta_checkpoint is not None:
+                checkpoint_dir, delta_manifest = delta_checkpoint
+                weights_path = checkpoint_dir / str(delta_manifest.get("weights", ""))
+                if not weights_path.is_file() or weights_path.stat().st_size <= 0:
+                    raise BehaviorLeRobotAdapterError(
+                        f"PI0.5 delta weights are unavailable: {weights_path}"
+                    )
+                delta_state = torch_module.load(
+                    weights_path,
+                    map_location=target_device,
+                    weights_only=True,
+                )
+                if not isinstance(delta_state, dict) or not delta_state:
+                    raise BehaviorLeRobotAdapterError(
+                        f"PI0.5 delta state is empty or invalid: {weights_path}"
+                    )
+                known_keys = set(policy.state_dict())
+                unexpected_delta = sorted(set(delta_state).difference(known_keys))
+                if unexpected_delta:
+                    raise BehaviorLeRobotAdapterError(
+                        "PI0.5 delta contains unknown keys: "
+                        f"{unexpected_delta[:5]}"
+                    )
+                load_result = policy.load_state_dict(delta_state, strict=False)
+                if load_result.unexpected_keys:
+                    raise BehaviorLeRobotAdapterError(
+                        "PI0.5 delta load reported unexpected keys: "
+                        f"{load_result.unexpected_keys[:5]}"
+                    )
+                print(
+                    "BEHAVIOR1K_PI05_DELTA_CHECKPOINT_LOADED "
+                    f"path={checkpoint_dir} tensors={len(delta_state)}"
+                )
+            return policy
     finally:
+        cfg.pretrained_path = requested_pretrained_path
         safetensors_torch.load_file = original_load_file

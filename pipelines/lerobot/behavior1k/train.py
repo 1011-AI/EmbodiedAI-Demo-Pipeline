@@ -23,6 +23,10 @@ from .adapter import (
     load_behavior_view,
     make_behavior_train_eval_datasets,
 )
+from .checkpoint import (
+    delta_checkpoint_requested,
+    save_pi05_delta_checkpoint,
+)
 from .loading import (
     direct_cuda_load_requested,
     make_policy_with_memory_strategy,
@@ -76,6 +80,11 @@ def main(argv: Sequence[str] | None = None) -> None:
         )
 
     original_factory = lerobot_train.make_train_eval_datasets
+    original_save_checkpoint = getattr(lerobot_train, "save_checkpoint", None)
+    if original_save_checkpoint is None and delta_checkpoint_requested():
+        raise BehaviorLeRobotAdapterError(
+            "delta checkpointing requires lerobot_train.save_checkpoint"
+        )
 
     def behavior_factory(cfg):
         return make_behavior_train_eval_datasets(
@@ -96,6 +105,8 @@ def main(argv: Sequence[str] | None = None) -> None:
     lerobot_train.make_train_eval_datasets = behavior_factory
     if original_make_policy is not None:
         lerobot_train.make_policy = behavior_make_policy
+    if delta_checkpoint_requested():
+        lerobot_train.save_checkpoint = save_pi05_delta_checkpoint
     original_argv = sys.argv
     sys.argv = [original_argv[0], *lerobot_args]
     try:
@@ -105,6 +116,8 @@ def main(argv: Sequence[str] | None = None) -> None:
         lerobot_train.make_train_eval_datasets = original_factory
         if original_make_policy is not None:
             lerobot_train.make_policy = original_make_policy
+        if original_save_checkpoint is not None:
+            lerobot_train.save_checkpoint = original_save_checkpoint
 
 
 if __name__ == "__main__":

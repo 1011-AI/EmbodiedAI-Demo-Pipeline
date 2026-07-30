@@ -318,6 +318,16 @@ cgroup 容器中可能尚未占用 GPU 就被 OOM kill；开关开启后，模�
 Accelerate 为当前 rank 选择的 CUDA device。它不改动固定的 LeRobot checkout，
 普通大内存环境可将该开关设为 `false` 回到上游默认行为。
 
+当前 16 GB cgroup 配置同时启用 `policy.train_expert_only` 和
+`runtime.delta_checkpoint`：PaliGemma 视觉语言主干仍参与真实前向，但被冻结；action
+expert 与投影层参与反向更新。checkpoint 保存为
+`pretrained_model/behavior1k_delta_checkpoint.json` +
+`pretrained_model/trainable_state.pt`，推理入口会先加载固定 π0.5 base，再严格叠加真实
+训练参数。这样避免 LeRobot/Safetensors 在保存完整 4B 模型时把全部 CUDA tensor 同时
+搬到 CPU。该产物可直接用于离线推理和 policy server，但不含 optimizer/RNG，不能用于
+断点续训；需要可恢复长训时应在独占大内存容器中关闭该开关，或后续接入 FSDP 分片
+checkpoint。
+
 ### custom FastWAM
 
 - 复用 FastWAM/Wan 中形状兼容的 backbone；

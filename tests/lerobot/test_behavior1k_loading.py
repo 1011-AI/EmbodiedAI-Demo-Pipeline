@@ -41,12 +41,18 @@ class _FakeCuda:
 
 class _FakeTorch:
     cuda = _FakeCuda()
+    loaded = []
 
     @staticmethod
     def device(kind, index=None):
         if isinstance(kind, _FakeDevice):
             return kind
         return _FakeDevice(kind, index)
+
+    @classmethod
+    def load(cls, path, **kwargs):
+        cls.loaded.append((path, kwargs))
+        return {"model.expert": "updated"}
 
 
 def test_direct_cuda_load_uses_current_rank_device_and_restores_patch(
@@ -191,3 +197,73 @@ def test_explicit_cuda_device_must_match_accelerate_current_device(
         assert "current=cuda:3" in str(exc)
     else:  # pragma: no cover - test assertion branch.
         raise AssertionError("expected device mismatch")
+
+
+def test_delta_checkpoint_loads_base_then_applies_trainable_state(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    (project_root / "pyproject.toml").write_text("[project]\nname='test'\n")
+    base_dir = project_root / "models/pi05/base"
+    base_dir.mkdir(parents=True)
+    (base_dir / "model.safetensors").write_bytes(b"base")
+    checkpoint_dir = project_root / "runs/checkpoint/pretrained_model"
+    checkpoint_dir.mkdir(parents=True)
+    (checkpoint_dir / "trainable_state.pt").write_bytes(b"delta")
+    (checkpoint_dir / "behavior1k_delta_checkpoint.json").write_text(
+        '{"format":"pi05_trainable_delta_v1",'
+        '"weights":"trainable_state.pt",'
+        '"base_pretrained_path":"models/pi05/base"}'
+    )
+
+    fake_safetensors = SimpleNamespace(
+        load_file=lambda *_args, **_kwargs: {"base": "tensor"},
+    )
+    monkeypatch.chdir(project_root)
+    monkeypatch.setenv(loading.DIRECT_CUDA_LOAD_ENV, "1")
+    monkeypatch.setattr(
+        loading,
+        "_load_runtime_modules",
+        lambda: (_FakeTorch, fake_safetensors),
+    )
+    _FakeTorch.loaded = []
+    policy_cfg = SimpleNamespace(
+        type="pi05",
+        device="cuda",
+        pretrained_path=checkpoint_dir,
+    )
+
+    class FakePolicy:
+        def __init__(self):
+            self.loaded = None
+
+        @staticmethod
+        def state_dict():
+            return {"model.base": "base", "model.expert": "old"}
+
+        def load_state_dict(self, state, strict):
+            self.loaded = (state, strict)
+            return SimpleNamespace(unexpected_keys=[])
+
+    policy = FakePolicy()
+
+    def fake_make_policy(**kwargs):
+        assert kwargs["cfg"].pretrained_path == base_dir.resolve()
+        fake_safetensors.load_file("model.safetensors")
+        print("✓ Loaded state dict from model.safetensors")
+        print("All keys loaded successfully!")
+        return policy
+
+    loaded = loading.make_policy_with_memory_strategy(
+        fake_make_policy,
+        cfg=policy_cfg,
+        ds_meta=object(),
+    )
+
+    assert loaded is policy
+    assert policy.loaded == ({"model.expert": "updated"}, False)
+    assert policy_cfg.pretrained_path == checkpoint_dir
+    assert _FakeTorch.loaded[0][0] == checkpoint_dir / "trainable_state.pt"
+    assert str(_FakeTorch.loaded[0][1]["map_location"]) == "cuda:3"

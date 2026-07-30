@@ -235,6 +235,10 @@ def build_environment(config: dict[str, Any], project_root: Path) -> dict[str, s
         env["BEHAVIOR1K_PI05_DIRECT_CUDA_LOAD"] = "1"
     else:
         env.pop("BEHAVIOR1K_PI05_DIRECT_CUDA_LOAD", None)
+    if bool(runtime.get("delta_checkpoint", False)):
+        env["BEHAVIOR1K_PI05_DELTA_CHECKPOINT"] = "1"
+    else:
+        env.pop("BEHAVIOR1K_PI05_DELTA_CHECKPOINT", None)
     if bool(runtime.get("offline", True)):
         env["HF_HUB_OFFLINE"] = "1"
         env["HF_DATASETS_OFFLINE"] = "1"

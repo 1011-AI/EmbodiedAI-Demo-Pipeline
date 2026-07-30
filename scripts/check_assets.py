@@ -15,6 +15,7 @@ class Asset:
     path: str
     kind: str = "dir_nonempty"
     required: bool = True
+    expected: str | None = None
 
 
 @dataclass
@@ -106,6 +107,14 @@ ASSETS: tuple[Asset, ...] = (
         "hf_cache/hub/models--google--paligemma-3b-pt-224/snapshots/35e4f46485b4d07967e7e9935bc3786aad50687c/tokenizer.json",
         "file_nonempty",
     ),
+    Asset(
+        "lerobot-pi05",
+        "PaliGemma main revision cache ref",
+        "hf_cache/hub/models--google--paligemma-3b-pt-224/refs/main",
+        "file_content",
+        True,
+        "35e4f46485b4d07967e7e9935bc3786aad50687c",
+    ),
 )
 
 PROFILE_ORDER = ("core", "lerobot", "lerobot-pi05", "custom-fastwam", "imagewam")
@@ -128,6 +137,15 @@ def check_asset(root: Path, asset: Asset) -> AssetStatus:
             f"file exists ({path.stat().st_size} bytes)"
             if ok
             else "non-empty file not found"
+        )
+    elif asset.kind == "file_content":
+        actual = path.read_text(encoding="utf-8") if path.is_file() else None
+        ok = actual == asset.expected
+        status = "ok" if ok else "missing"
+        detail = (
+            "file content matches"
+            if ok
+            else f"expected exact content {asset.expected!r}, got {actual!r}"
         )
     elif asset.kind == "glob_file":
         matches = sorted(item for item in root.glob(asset.path) if item.is_file())
