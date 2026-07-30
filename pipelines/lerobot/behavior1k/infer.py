@@ -138,6 +138,7 @@ def _make_pi05_runtime(
 
     try:
         import torch
+        from lerobot.configs import PreTrainedConfig
         from lerobot.policies import make_policy, make_pre_post_processors
         from lerobot.policies.pi05.configuration_pi05 import PI05Config
     except ImportError as exc:
@@ -165,7 +166,14 @@ def _make_pi05_runtime(
             "PI0.5 checkpoint has neither full model.safetensors nor a complete "
             f"BEHAVIOR delta pair under {pretrained_dir}"
         )
-    policy_config = PI05Config.from_pretrained(str(pretrained_dir))
+    # Calling PI05Config.from_pretrained directly is broken in pinned LeRobot
+    # 0.6.1 because its first draccus pass rejects the registered ``type`` key.
+    # The base registry resolves that key to PI05Config before applying fields.
+    policy_config = PreTrainedConfig.from_pretrained(str(pretrained_dir))
+    if not isinstance(policy_config, PI05Config):
+        raise BehaviorLeRobotAdapterError(
+            f"checkpoint config is not PI0.5: {type(policy_config).__name__}"
+        )
     if policy_config.use_relative_actions:
         raise BehaviorLeRobotAdapterError(
             "PI0.5 checkpoint declares use_relative_actions=true, but the current "
