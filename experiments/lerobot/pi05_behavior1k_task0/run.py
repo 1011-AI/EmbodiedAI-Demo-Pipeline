@@ -4,10 +4,10 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import os
 import shlex
-import shutil
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -36,7 +36,76 @@ def _mapping(config: dict[str, Any], name: str) -> dict[str, Any]:
     return value
 
 
-def load_config(path: Path) -> dict[str, Any]:
+_PROFILE_SECTIONS = {
+    "policy": {"gradient_checkpointing"},
+    "training": {"batch_size", "num_workers", "persistent_workers"},
+    "distributed": {"num_processes"},
+}
+
+
+def _resolve_profile(
+    payload: dict[str, Any],
+    profile_override: str | None = None,
+) -> dict[str, Any]:
+    experiment = _mapping(payload, "experiment")
+    configured = str(experiment.get("profile") or "").strip()
+    if profile_override is not None:
+        selected = profile_override.strip()
+        if not selected:
+            raise SystemExit("ERROR: --profile cannot be empty")
+    else:
+        selected = configured
+    if not selected:
+        raise SystemExit("ERROR: experiment.profile is required")
+
+    profiles = payload.get("profiles")
+    if not isinstance(profiles, dict) or not profiles:
+        raise SystemExit("ERROR: profiles must be a non-empty mapping")
+    invalid_names = [
+        name for name in profiles if not isinstance(name, str) or not name.strip()
+    ]
+    if invalid_names:
+        raise SystemExit("ERROR: every profiles key must be a non-empty string")
+    if selected not in profiles:
+        available = ", ".join(sorted(profiles))
+        raise SystemExit(
+            f"ERROR: unknown profile {selected!r}; available profiles: {available}"
+        )
+
+    overrides = profiles[selected]
+    if not isinstance(overrides, dict):
+        raise SystemExit(f"ERROR: profiles.{selected} must be a mapping")
+    unknown_sections = sorted(set(overrides) - set(_PROFILE_SECTIONS))
+    if unknown_sections:
+        raise SystemExit(
+            f"ERROR: profiles.{selected} has unsupported sections: "
+            + ", ".join(unknown_sections)
+        )
+
+    resolved = copy.deepcopy(payload)
+    for section_name, section_overrides in overrides.items():
+        if not isinstance(section_overrides, dict):
+            raise SystemExit(
+                f"ERROR: profiles.{selected}.{section_name} must be a mapping"
+            )
+        unknown_keys = sorted(
+            set(section_overrides) - _PROFILE_SECTIONS[section_name]
+        )
+        if unknown_keys:
+            raise SystemExit(
+                f"ERROR: profiles.{selected}.{section_name} has unsupported keys: "
+                + ", ".join(unknown_keys)
+            )
+        _mapping(resolved, section_name).update(section_overrides)
+
+    _mapping(resolved, "experiment")["profile"] = selected
+    # The run artifact should contain only the values actually used, not every
+    # alternative profile that could have been selected.
+    resolved.pop("profiles", None)
+    return resolved
+
+
+def load_config(path: Path, *, profile: str | None = None) -> dict[str, Any]:
     payload = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
     if not isinstance(payload, dict):
         raise SystemExit("ERROR: config root must be a mapping")
@@ -53,7 +122,7 @@ def load_config(path: Path) -> dict[str, Any]:
         "runtime",
     ):
         _mapping(payload, section)
-    return payload
+    return _resolve_profile(payload, profile)
 
 
 def _path(project_root: Path, raw: Any) -> Path:
@@ -326,13 +395,21 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--checkpoint", help="Override inference.checkpoint")
     parser.add_argument("--num-processes", type=int, help="Override local GPU/process count")
+    parser.add_argument(
+        "--profile",
+        help="Override experiment.profile, for example: smoke or a800_8gpu",
+    )
     args = parser.parse_args(argv)
 
     project_root = find_project_root(here)
     config_path = args.config.expanduser().resolve()
-    config = load_config(config_path)
+    config = load_config(config_path, profile=args.profile)
     experiment = _mapping(config, "experiment")
     paths = _mapping(config, "paths")
+    if args.num_processes is not None:
+        # Keep the persisted resolved config aligned with the actual command.
+        _resolve_local_processes(args.num_processes)
+        _mapping(config, "distributed")["num_processes"] = args.num_processes
     run_id = _run_id(config)
     run_dir = _path(project_root, paths.get("run_root", "runs")) / run_id
     command = (
@@ -356,6 +433,7 @@ def main(argv: list[str] | None = None) -> int:
             {
                 "mode": args.mode,
                 "experiment": experiment.get("name"),
+                "profile": experiment.get("profile"),
                 "run_id": run_id,
                 "run_dir": str(run_dir),
                 "command": command,
@@ -393,12 +471,16 @@ def main(argv: list[str] | None = None) -> int:
     if run_dir.exists():
         raise SystemExit(f"ERROR: run directory already exists: {run_dir}")
     run_dir.mkdir(parents=True)
-    shutil.copy2(config_path, run_dir / "resolved_config.yaml")
+    (run_dir / "resolved_config.yaml").write_text(
+        yaml.safe_dump(config, allow_unicode=True, sort_keys=False),
+        encoding="utf-8",
+    )
     (run_dir / "command.txt").write_text(shlex.join(command) + "\n", encoding="utf-8")
     manifest = {
         "schema_version": "1.0",
         "backend": "lerobot",
         "policy_type": "pi05",
+        "profile": experiment.get("profile"),
         "mode": args.mode,
         "run_id": run_id,
         "created_at": datetime.now(timezone.utc).isoformat(),

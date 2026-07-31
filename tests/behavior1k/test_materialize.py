@@ -181,6 +181,89 @@ def test_copy_mode_is_explicit_and_does_not_reuse_inodes(tmp_path: Path) -> None
     assert result["inventory"]["inode_reuse_bytes"] == 0
 
 
+def test_policy23_materialization_rewrites_numeric_state_and_stats(
+    tmp_path: Path,
+) -> None:
+    pa = pytest.importorskip("pyarrow")
+    pq = pytest.importorskip("pyarrow.parquet")
+    np = pytest.importorskip("numpy")
+
+    source, view, referenced = _write_source_and_view(tmp_path)
+    raw_state = np.arange(2 * 61, dtype=np.float32).reshape(2, 61)
+    action = np.arange(2 * 23, dtype=np.float32).reshape(2, 23)
+    pq.write_table(
+        pa.table(
+            {
+                "observation.state": pa.array(raw_state.tolist(), type=pa.list_(pa.float32())),
+                "action": pa.array(action.tolist(), type=pa.list_(pa.float32())),
+                "episode_index": pa.array([0, 0], type=pa.int64()),
+            }
+        ),
+        referenced["data"],
+    )
+    pq.write_table(
+        pa.table(
+            {
+                "task_index": pa.array([0, 1], type=pa.int64()),
+                "task": pa.array(["turning_on_radio", "another_task"]),
+            }
+        ),
+        source / "meta/tasks.parquet",
+    )
+    policy_stats = {
+        "observation.state": {"mean": [1.0] * 23},
+        "action": {"mean": [2.0] * 23},
+    }
+    (view / "policy_stats.json").write_text(
+        json.dumps(policy_stats),
+        encoding="utf-8",
+    )
+    output = tmp_path / "policy23"
+
+    result = materialize_behavior_view(
+        view_dir=view,
+        output_root=output,
+        state_layout="policy23",
+    )
+
+    table = pq.read_table(output / "data/chunk-007/file-011.parquet")
+    projected = np.asarray(table["observation.state"].to_pylist(), dtype=np.float32)
+    expected = np.concatenate(
+        (
+            raw_state[:, 0:3],
+            raw_state[:, 53:57],
+            raw_state[:, 3:10],
+            (raw_state[:, 24] + raw_state[:, 25])[:, None],
+            raw_state[:, 28:35],
+            (raw_state[:, 49] + raw_state[:, 50])[:, None],
+        ),
+        axis=1,
+    )
+    np.testing.assert_array_equal(projected, expected)
+    info = json.loads((output / "meta/info.json").read_text(encoding="utf-8"))
+    stats = json.loads((output / "meta/stats.json").read_text(encoding="utf-8"))
+    tasks = pq.read_table(output / "meta/tasks.parquet")
+    assert info["features"]["observation.state"]["shape"] == [23]
+    assert len(info["features"]["observation.state"]["names"]) == 23
+    assert stats["observation.state"] == policy_stats["observation.state"]
+    assert stats["action"] == policy_stats["action"]
+    assert tasks["task"].to_pylist() == ["Turn on the radio.", "another_task"]
+    assert result["projection"]["state_layout"] == "policy23"
+    assert result["projection"]["rewritten_data_file_count"] == 1
+    assert result["projection"]["rewritten_task_metadata_file_count"] == 1
+    assert os.stat(referenced["data"]).st_ino != os.stat(
+        output / "data/chunk-007/file-011.parquet"
+    ).st_ino
+    actual_reuse_bytes = 0
+    for destination in output.rglob("*"):
+        if not destination.is_file():
+            continue
+        source_file = source / destination.relative_to(output)
+        if source_file.is_file() and source_file.stat().st_ino == destination.stat().st_ino:
+            actual_reuse_bytes += destination.stat().st_size
+    assert result["inventory"]["inode_reuse_bytes"] == actual_reuse_bytes
+
+
 def test_hardlink_failure_never_silently_falls_back_to_copy(
     tmp_path: Path,
     monkeypatch,
@@ -231,5 +314,8 @@ def test_materialize_cli_reports_inventory(tmp_path: Path, capsys) -> None:
     )
 
     assert exit_code == 0
-    assert "BEHAVIOR1K_MATERIALIZED mode=hardlink episodes=1" in capsys.readouterr().out
+    assert (
+        "BEHAVIOR1K_MATERIALIZED mode=hardlink state=raw61 episodes=1"
+        in capsys.readouterr().out
+    )
     assert (output / "materialization_manifest.json").is_file()

@@ -125,7 +125,7 @@ PaliGemma 可能要求先在 Hugging Face 网页接受许可并交互登录。�
 ```bash
 python experiments/lerobot/pi05_behavior1k_task0/run.py \
   --dry-run \
-  --num-processes 1
+  --profile smoke
 ```
 
 `--dry-run` 只解析 YAML 并展示最终 `accelerate launch` 命令，不检查数据、权重和 CUDA。
@@ -135,7 +135,7 @@ python experiments/lerobot/pi05_behavior1k_task0/run.py \
 ```bash
 python experiments/lerobot/pi05_behavior1k_task0/run.py \
   --preflight \
-  --num-processes 1
+  --profile smoke
 ```
 
 它检查：
@@ -152,7 +152,7 @@ python experiments/lerobot/pi05_behavior1k_task0/run.py \
 
 ```bash
 python experiments/lerobot/pi05_behavior1k_task0/run.py \
-  --num-processes 1
+  --profile smoke
 ```
 
 默认配置执行 2 个真实 optimizer update。它会加载 π0.5 base，冻结 PaliGemma 主干，
@@ -224,16 +224,13 @@ cp experiments/lerobot/pi05_behavior1k_task0/config.yaml \
 
 ```yaml
 experiment:
+  profile: smoke
   run_id: pi05_task0_pilot_001
 
 training:
   steps: 50
-  batch_size: 1
   log_freq: 1
   save_freq: 50
-
-distributed:
-  num_processes: 1
 ```
 
 然后执行：
@@ -459,7 +456,7 @@ BEHAVIOR-1K v3.9.1 simulator evaluator。
 
 | 现象 | 原因与处理 |
 |---|---|
-| π0.5 一启动就占用全部 GPU | `num_processes: auto`；首次显式传 `--num-processes 1` 并限制 `CUDA_VISIBLE_DEVICES` |
+| π0.5 一启动就占用全部 GPU | 默认是 `a800_8gpu` profile；单卡首次运行使用 `--profile smoke` 并限制 `CUDA_VISIBLE_DEVICES=0` |
 | π0.5 推理得到的还是 base 结果 | 忘记传训练后的 `--checkpoint .../pretrained_model` |
 | GPU 看不到完整数据路径 | 使用项目内 `data/behavior1k/materialized/turning_on_radio` 并设置 `BEHAVIOR1K_DATA_ROOT` |
 | FastWAM 找不到 Torch | 误激活了只含依赖的 `.venv_fastwam`；回到平台带 CUDA/Torch 的 Python |

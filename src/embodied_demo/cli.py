@@ -132,13 +132,15 @@ def _command_behavior1k_materialize_view(args: argparse.Namespace) -> int:
         view_dir=args.view_dir,
         output_root=args.output_root,
         mode=args.mode,
+        state_layout=args.state_layout,
         source_root_override=args.source_root,
     )
     projection = result["projection"]
     inventory = result["inventory"]
     print(
         "BEHAVIOR1K_MATERIALIZED "
-        f"mode={projection['mode']} episodes={projection['episode_count']} "
+        f"mode={projection['mode']} state={projection['state_layout']} "
+        f"episodes={projection['episode_count']} "
         f"files={inventory['materialized_file_count']} "
         f"bytes={inventory['materialized_bytes']} "
         f"inode_reuse={inventory['inode_reuse_file_count']}"
@@ -281,6 +283,15 @@ def build_parser() -> argparse.ArgumentParser:
         "--mode",
         choices=["hardlink", "copy"],
         default="hardlink",
+    )
+    behavior_materialize.add_argument(
+        "--state-layout",
+        choices=["raw61", "policy23"],
+        default="raw61",
+        help=(
+            "raw61 keeps source Parquet unchanged; policy23 rewrites only selected "
+            "numeric shards to the canonical R1Pro policy state"
+        ),
     )
     behavior_materialize.add_argument(
         "--source-root",

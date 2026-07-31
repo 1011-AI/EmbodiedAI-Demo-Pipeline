@@ -215,7 +215,8 @@ embodied-demo behavior1k-prepare-view \
 # 默认 hardlink；源目录与项目共享目录必须位于同一文件系统。
 embodied-demo behavior1k-materialize-view \
   --view-dir data/behavior1k/views/r1pro_policy23/turning_on_radio \
-  --output-root data/behavior1k/materialized/turning_on_radio
+  --output-root data/behavior1k/materialized/turning_on_radio \
+  --state-layout raw61
 ```
 
 投影严格读取 `view_manifest.json` 与 `episodes.jsonl` 中的 data、三路 RGB 和
@@ -255,6 +256,31 @@ python experiments/lerobot/pi05_behavior1k_task0/run.py --dry-run
 
 设置 `BEHAVIOR1K_DATA_ROOT` 后，LeRobot adapter 会先验证目录真实存在；错误的 mount
 不会继续触发 Hub 下载或读到管理节点旧路径。
+
+### MXI 的独立 policy23 数据根目录
+
+上面的 LeRobot 路线必须保留官方 61D `observation.state`，由 Demo-Pipeline adapter
+在读取时投影。MXI 的数据层按设计不做维度投影，因此必须物化另一份 23D 数值数据，
+并使用不同目录；两者不能交叉使用：
+
+```bash
+embodied-demo behavior1k-materialize-view \
+  --view-dir data/behavior1k/views/r1pro_policy23/turning_on_radio \
+  --output-root data/behavior1k/materialized/mxi_policy23/turning_on_radio \
+  --state-layout policy23 \
+  --mode copy
+```
+
+若源与目标确实在同一文件系统，可省略 `--mode copy`，此时数值 Parquet 和 Task 0
+语言 metadata 仍会重写，体积最大的三路 RGB 视频会 hardlink。MXI 配置接收的是包含
+`turning_on_radio/` 的父目录：
+
+```bash
+export BEHAVIOR1K_MXI_DATA_PARENT="$PWD/data/behavior1k/materialized/mxi_policy23"
+```
+
+`raw61` 目录只供 Demo-Pipeline 的 LeRobot adapter 使用；`policy23` 目录只供 MXI
+等直接消费 canonical 23D state/action 的框架使用。
 
 ## Policy 协议
 

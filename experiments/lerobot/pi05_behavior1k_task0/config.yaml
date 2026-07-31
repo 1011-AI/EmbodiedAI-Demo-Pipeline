@@ -4,10 +4,10 @@
 #   python experiments/lerobot/pi05_behavior1k_task0/run.py --dry-run
 #
 # 检查数据、权重、CUDA 和进程数，但不启动训练：
-#   python experiments/lerobot/pi05_behavior1k_task0/run.py --preflight --num-processes 1
+#   python experiments/lerobot/pi05_behavior1k_task0/run.py --profile smoke --preflight
 #
 # 启动真实训练：
-#   python experiments/lerobot/pi05_behavior1k_task0/run.py --num-processes 1
+#   python experiments/lerobot/pi05_behavior1k_task0/run.py --profile smoke
 #
 # 使用 checkpoint 做真实离线推理：
 #   python experiments/lerobot/pi05_behavior1k_task0/run.py --mode infer
@@ -17,6 +17,9 @@ backend: lerobot
 
 experiment:
   name: pi05_behavior1k_task0
+  # 默认使用已经在 8×A800 80 GB / 64 CPU 核上验证的吞吐 profile。
+  # 单卡检查使用 run.py --profile smoke，不要手改下面的实测值。
+  profile: a800_8gpu
   # 留空时每次运行自动生成时间戳；需要稳定续跑时显式填写。
   run_id:
 
@@ -52,9 +55,9 @@ policy:
 
   # 短探针关闭 compile，避免首次编译时间掩盖真实数据/模型错误。
   compile_model: false
-  gradient_checkpointing: true
+  # 由 experiment.profile 选择：a800_8gpu=false，smoke=true。
   # 采用 action expert 后训练；PaliGemma VLM 冻结但仍参与前向，训练的是真实
-  # π0.5 action expert，不是 mock。8×A800 吞吐实验可关闭 gradient checkpointing。
+  # π0.5 action expert，不是 mock。
   train_expert_only: true
   push_to_hub: false
 
@@ -62,12 +65,8 @@ training:
   # 默认是可观察 loss 的最短真实后训练探针。one-batch overfit 时可把 view
   # 收窄到一个 episode，并将 steps 提高到 20-100。
   steps: 2
-  batch_size: 1
-  # 默认 worker=0 兼容小内存单卡首跑。已验证的 8×A800/64 核吞吐起点是
-  # batch_size=8、num_workers=4、gradient_checkpointing=false（全局 batch=64）。
-  num_workers: 0
+  # batch_size / num_workers 由 profile 固定，避免口头约定与真实命令漂移。
   prefetch_factor: 2
-  persistent_workers: true
   log_freq: 1
 
   save_checkpoint: true
@@ -76,11 +75,7 @@ training:
   wandb: false
 
 distributed:
-  # auto 优先读取平台 NPROC_PER_NODE，其次读取 CUDA_VISIBLE_DEVICES / torch。
-  # 因此同一配置可在单卡、4 卡或 8 卡节点直接运行；仍可用 run.py
-  # 的 --num-processes 做一次性显式覆盖。新人第一次运行必须显式传 1，
-  # 确认链路后再启用多卡，避免 auto 占用全部可见 GPU。
-  num_processes: auto
+  # 本地进程数由 profile 固定；仍可用 --num-processes 做一次性显式覆盖。
   mixed_precision: bf16
 
   # 当前入口同时支持平台向每个节点注入这些参数。单机无需修改。
@@ -88,6 +83,31 @@ distributed:
   machine_rank: 0
   main_process_ip: 127.0.0.1
   main_process_port: 29505
+
+# 同一份 Behavior1K 配置里保留两个明确 profile，不再复制第二份 YAML。
+# 只有这些已声明字段可被 profile 覆盖；run.py 会对拼写错误直接报错。
+profiles:
+  a800_8gpu:
+    policy:
+      gradient_checkpointing: false
+    training:
+      # 已验证吞吐起点：每 GPU batch=8，8 进程全局 batch=64。
+      batch_size: 8
+      num_workers: 4
+      persistent_workers: true
+    distributed:
+      num_processes: 8
+
+  smoke:
+    policy:
+      gradient_checkpointing: true
+    training:
+      batch_size: 1
+      num_workers: 0
+      # PyTorch DataLoader 在 num_workers=0 时不能启用常驻 worker。
+      persistent_workers: false
+    distributed:
+      num_processes: 1
 
 inference:
   # 默认可直接用 base 做链路检查。训练后改为：
