@@ -11,6 +11,7 @@ current CUDA device.
 from __future__ import annotations
 
 import contextlib
+import gc
 import io
 import json
 import os
@@ -24,7 +25,14 @@ from .adapter import BehaviorLeRobotAdapterError
 from .checkpoint import DELTA_MANIFEST
 
 DIRECT_CUDA_LOAD_ENV = "BEHAVIOR1K_PI05_DIRECT_CUDA_LOAD"
+SERIALIZE_DISTRIBUTED_LOAD_ENV = "BEHAVIOR1K_PI05_SERIALIZE_DISTRIBUTED_LOAD"
 _TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
+_FALSE_VALUES = frozenset({"0", "false", "no", "off"})
+_GIB = 1024**3
+_CGROUP_MEMORY_LIMIT_FILES = (
+    Path("/sys/fs/cgroup/memory.max"),
+    Path("/sys/fs/cgroup/memory/memory.limit_in_bytes"),
+)
 _LOAD_SUCCESS_MARKERS = (
     "Loaded state dict from model.safetensors",
     "All keys loaded successfully!",
@@ -118,6 +126,102 @@ def _call_with_load_guard(call: Callable[[], Any]) -> Any:
     with contextlib.redirect_stdout(evidence):
         policy = call()
     validate_pi05_checkpoint_load(evidence.getvalue())
+    return policy
+
+
+def _cgroup_memory_limit_bytes() -> int | None:
+    """Return the effective container memory limit when it is finite."""
+
+    for path in _CGROUP_MEMORY_LIMIT_FILES:
+        try:
+            raw = path.read_text(encoding="utf-8").strip()
+        except OSError:
+            continue
+        if not raw or raw == "max":
+            return None
+        try:
+            value = int(raw)
+        except ValueError:
+            continue
+        # cgroup v1 commonly exposes an enormous sentinel for "unlimited".
+        if 0 < value < (1 << 60):
+            return value
+    return None
+
+
+def _distributed_load_context(torch_module: Any) -> tuple[Any, int, int] | None:
+    distributed = getattr(torch_module, "distributed", None)
+    if distributed is None:
+        return None
+    if not distributed.is_available() or not distributed.is_initialized():
+        return None
+    world_size = int(distributed.get_world_size())
+    if world_size <= 1:
+        return None
+    return distributed, int(distributed.get_rank()), world_size
+
+
+def _serialize_distributed_load_requested(
+    torch_module: Any,
+    environ: MutableMapping[str, str] | None = None,
+) -> bool:
+    """Choose rank-serialized loading for memory-constrained DDP jobs.
+
+    Even direct-to-CUDA safetensors loading has a short-lived CPU/RSS cost. If
+    every DDP rank pays it at once, an otherwise valid 8-GPU job can exceed a
+    small pod cgroup. ``auto`` serializes when the cgroup provides less than
+    8 GiB per rank; callers can force or disable it with the environment flag.
+    """
+
+    context = _distributed_load_context(torch_module)
+    if context is None:
+        return False
+    value = str(
+        (os.environ if environ is None else environ).get(
+            SERIALIZE_DISTRIBUTED_LOAD_ENV,
+            "auto",
+        )
+    ).strip().lower()
+    if value in _TRUE_VALUES:
+        return True
+    if value in _FALSE_VALUES:
+        return False
+    if value != "auto":
+        raise BehaviorLeRobotAdapterError(
+            f"{SERIALIZE_DISTRIBUTED_LOAD_ENV} must be auto/true/false, got {value!r}"
+        )
+    limit = _cgroup_memory_limit_bytes()
+    return limit is not None and limit < context[2] * 8 * _GIB
+
+
+def _call_with_distributed_load_strategy(
+    torch_module: Any,
+    call: Callable[[], Any],
+) -> Any:
+    """Load one rank at a time when concurrent checkpoint RSS would OOM."""
+
+    context = _distributed_load_context(torch_module)
+    if context is None or not _serialize_distributed_load_requested(torch_module):
+        return call()
+    distributed, rank, world_size = context
+    policy = None
+    limit = _cgroup_memory_limit_bytes()
+    print(
+        "BEHAVIOR1K_PI05_SERIALIZED_DISTRIBUTED_LOAD "
+        f"rank={rank} world_size={world_size} cgroup_limit_bytes={limit}"
+    )
+    for loader_rank in range(world_size):
+        if rank == loader_rank:
+            policy = call()
+            synchronize = getattr(torch_module.cuda, "synchronize", None)
+            if synchronize is not None:
+                synchronize()
+            gc.collect()
+        distributed.barrier()
+    if policy is None:  # pragma: no cover - defensive invariant.
+        raise BehaviorLeRobotAdapterError(
+            f"serialized PI0.5 load did not construct policy on rank {rank}"
+        )
     return policy
 
 
@@ -237,7 +341,10 @@ def make_policy_with_memory_strategy(
             torch_module.cuda.device(target_device),
             torch_module.device(target_device),
         ):
-            policy = _call_with_load_guard(create_policy)
+            policy = _call_with_distributed_load_strategy(
+                torch_module,
+                lambda: _call_with_load_guard(create_policy),
+            )
             if delta_checkpoint is not None:
                 checkpoint_dir, delta_manifest = delta_checkpoint
                 weights_path = checkpoint_dir / str(delta_manifest.get("weights", ""))

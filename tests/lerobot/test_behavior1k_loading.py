@@ -171,6 +171,83 @@ def test_direct_cuda_load_restores_patch_when_policy_creation_fails(
     assert fake_safetensors.load_file is original_load_file
 
 
+def test_distributed_direct_load_is_serialized_under_small_cgroup(
+    monkeypatch,
+) -> None:
+    events = []
+
+    class FakeDistributed:
+        @staticmethod
+        def is_available() -> bool:
+            return True
+
+        @staticmethod
+        def is_initialized() -> bool:
+            return True
+
+        @staticmethod
+        def get_world_size() -> int:
+            return 3
+
+        @staticmethod
+        def get_rank() -> int:
+            return 1
+
+        @staticmethod
+        def barrier() -> None:
+            events.append("barrier")
+
+    class FakeCuda:
+        @staticmethod
+        def synchronize() -> None:
+            events.append("synchronize")
+
+    fake_torch = SimpleNamespace(distributed=FakeDistributed(), cuda=FakeCuda())
+    monkeypatch.delenv(loading.SERIALIZE_DISTRIBUTED_LOAD_ENV, raising=False)
+    monkeypatch.setattr(loading, "_cgroup_memory_limit_bytes", lambda: 16 * 1024**3)
+
+    result = loading._call_with_distributed_load_strategy(
+        fake_torch,
+        lambda: events.append("load") or "policy",
+    )
+
+    assert result == "policy"
+    assert events == ["barrier", "load", "synchronize", "barrier", "barrier"]
+
+
+def test_distributed_direct_load_serialization_can_be_disabled(
+    monkeypatch,
+) -> None:
+    class FakeDistributed:
+        @staticmethod
+        def is_available() -> bool:
+            return True
+
+        @staticmethod
+        def is_initialized() -> bool:
+            return True
+
+        @staticmethod
+        def get_world_size() -> int:
+            return 8
+
+        @staticmethod
+        def get_rank() -> int:
+            return 0
+
+        @staticmethod
+        def barrier() -> None:  # pragma: no cover - must remain unused.
+            raise AssertionError("barrier should not be called")
+
+    fake_torch = SimpleNamespace(distributed=FakeDistributed())
+    monkeypatch.setenv(loading.SERIALIZE_DISTRIBUTED_LOAD_ENV, "false")
+
+    assert (
+        loading._call_with_distributed_load_strategy(fake_torch, lambda: "policy")
+        == "policy"
+    )
+
+
 def test_explicit_cuda_device_must_match_accelerate_current_device(
     monkeypatch,
 ) -> None:
