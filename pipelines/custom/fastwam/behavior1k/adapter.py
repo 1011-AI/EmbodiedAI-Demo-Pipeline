@@ -893,7 +893,7 @@ CODEBASE_VERSION = "v2.1"
             frames = decode_video_frames(video_path, query_ts, self.tolerance_s, self.video_backend)
             item[vid_key] = frames.squeeze(0)
 """
-    video_after = """        item = {}
+    legacy_video_after = """        item = {}
         for vid_key, query_ts in query_timestamps.items():
             video_path = self.root / self.meta.get_video_file_path(ep_idx, vid_key)
             if self.meta._version >= packaging.version.parse("v3.0"):
@@ -905,7 +905,30 @@ CODEBASE_VERSION = "v2.1"
             frames = decode_video_frames(video_path, query_ts, self.tolerance_s, self.video_backend)
             item[vid_key] = frames.squeeze(0)
 """
-    replace_once(video_before, video_after, "v3 shared video timestamps")
+    video_after = """        item = {}
+        for vid_key, query_ts in query_timestamps.items():
+            video_path = self.root / self.meta.get_video_file_path(ep_idx, vid_key)
+            tolerance_s = self.tolerance_s
+            if self.meta._version >= packaging.version.parse("v3.0"):
+                query_ts = shift_v3_video_timestamps(
+                    self.meta.episodes[ep_idx],
+                    vid_key,
+                    query_ts,
+                )
+                # MP4 timestamps are quantized independently from the Parquet
+                # float32 timestamps.  At 30 FPS the resulting round-off can
+                # land exactly on the legacy 1e-4 strict boundary.  A 1 ms
+                # floor is still far below half a frame (16.7 ms), while
+                # avoiding false rejects and expensive worker resampling.
+                tolerance_s = max(tolerance_s, 1e-3)
+            frames = decode_video_frames(video_path, query_ts, tolerance_s, self.video_backend)
+            item[vid_key] = frames.squeeze(0)
+"""
+    if legacy_video_after in source and video_after not in source:
+        source = source.replace(legacy_video_after, video_after, 1)
+        changed = True
+    else:
+        replace_once(video_before, video_after, "v3 shared video timestamps")
 
     episode_table_before = """                file = str(dataset.root / dataset.meta.get_data_file_path(ep_index))
                 table = pq.read_table(str(file))

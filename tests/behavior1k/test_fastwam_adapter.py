@@ -438,6 +438,7 @@ def test_explicit_lerobot_key_patch_is_source_checked_and_idempotent(tmp_path: P
     assert "def _stack_hf_column(values):" in loader
     assert loader.count("_stack_hf_column(") == 5
     assert "disabled.  Do not" in loader
+    assert "tolerance_s = max(tolerance_s, 1e-3)" in loader
 
     # A partially patched generated tree must never be advertised as ready:
     # action construction would otherwise retain the high-host-memory path.
