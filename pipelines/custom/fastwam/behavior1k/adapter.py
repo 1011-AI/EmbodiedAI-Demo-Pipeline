@@ -1052,6 +1052,7 @@ def _patch_low_cpu_memory_sources(root: Path) -> bool:
         "action": root / "src/fastwam/models/wan22/action_dit.py",
         "model": root / "src/fastwam/models/wan22/fastwam.py",
         "trainer": root / "src/fastwam/trainer.py",
+        "runtime": root / "src/fastwam/runtime.py",
     }
     missing = [str(path) for path in paths.values() if not path.is_file()]
     if missing:
@@ -1567,6 +1568,38 @@ def _low_memory_checkpoint_enabled() -> bool:
                 trainer_save_before,
                 trainer_save_after,
                 "low-memory Accelerator checkpoint state",
+            ),
+        ),
+    )
+
+    runtime_logging_before = '''def run_training(cfg: DictConfig):
+    setup_logging(
+        log_level=logging.INFO,
+        is_main_process=torch.distributed.get_rank() == 0 if torch.distributed.is_initialized() else True,
+    )
+    misc.register_work_dir(cfg.output_dir)
+    config_payload = OmegaConf.to_container(cfg, resolve=True)
+    with open(Path(cfg.output_dir) / "config.yaml", "w") as f:
+        OmegaConf.save(config_payload, f)
+'''
+    runtime_logging_after = '''def run_training(cfg: DictConfig):
+    # Accelerate exports RANK/LOCAL_RANK before torch.distributed is initialized.
+    # Let the existing logging helper use those variables so non-zero ranks do
+    # not repeat DeepSpeed's import-time AIO/GDS compatibility probe logs.
+    setup_logging(log_level=logging.INFO)
+    misc.register_work_dir(cfg.output_dir)
+    if os.environ.get("RANK", "0").strip() in {"", "0"}:
+        config_payload = OmegaConf.to_container(cfg, resolve=True)
+        with open(Path(cfg.output_dir) / "config.yaml", "w") as f:
+            OmegaConf.save(config_payload, f)
+'''
+    patch_file(
+        "runtime",
+        (
+            (
+                runtime_logging_before,
+                runtime_logging_after,
+                "rank-aware runtime logging and config write",
             ),
         ),
     )

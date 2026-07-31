@@ -96,8 +96,8 @@ fastwam:
   mixed_precision: bf16
   wandb: false
 
-  # 当前容器 CPU cgroup 只有 16 GB。开启后，大模型在目标 CUDA/bf16 上直接
-  # 构造，release checkpoint 直接映射到 CUDA；默认关闭时保持上游行为。
+  # 多 rank 启动时减少大模型在主机内存中的临时副本：模型在目标 CUDA/bf16
+  # 上直接构造，release checkpoint 直接映射到 CUDA；关闭时保持上游行为。
   direct_cuda_load: true
 
   # 保存 action expert + proprio 的可加载 delta，并省略 Accelerator 的完整
@@ -133,15 +133,17 @@ mode:
     save_every: 1
 
   pilot:
-    # 短训看 loss 与吞吐；确认 smoke 后再把 fastwam.mode 改为 pilot。
+    # 8×A800、64 CPU 核、>=100 GiB 主机内存的已验证短训配置。
+    # B8/W6 受三路 HEVC 解码限制，实测慢于 B4/W6，不要盲目增大 batch。
     max_steps: 20
-    batch_size: 1
-    num_workers: 4
+    batch_size: 4
+    num_workers: 6
     save_every: 20
 
   full:
-    # 长实验的保守起点，显存和解码吞吐实测后再增大 batch/worker。
-    batch_size: 1
-    num_workers: 8
+    # 同一台 8×A800/64 核机器的稳健长训起点。W6 为 trainer、checkpoint
+    # 和系统进程保留 CPU 余量；峰值 probe 可临时试 W7，但不建议长期占满 64 核。
+    batch_size: 4
+    num_workers: 6
     num_epochs: 5
     save_every: 500

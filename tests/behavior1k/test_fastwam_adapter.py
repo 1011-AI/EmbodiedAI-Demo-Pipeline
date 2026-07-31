@@ -366,6 +366,22 @@ def _write_fastwam_source_fixture(root: Path) -> None:
             "            self._save_trainer_state(state_path)\n"
             "        self.accelerator.wait_for_everyone()\n"
         ),
+        "src/fastwam/runtime.py": (
+            "import logging\n"
+            "import os\n"
+            "from pathlib import Path\n"
+            "import torch\n"
+            "\n"
+            "def run_training(cfg: DictConfig):\n"
+            "    setup_logging(\n"
+            "        log_level=logging.INFO,\n"
+            "        is_main_process=torch.distributed.get_rank() == 0 if torch.distributed.is_initialized() else True,\n"
+            "    )\n"
+            "    misc.register_work_dir(cfg.output_dir)\n"
+            "    config_payload = OmegaConf.to_container(cfg, resolve=True)\n"
+            "    with open(Path(cfg.output_dir) / \"config.yaml\", \"w\") as f:\n"
+            "        OmegaConf.save(config_payload, f)\n"
+        ),
     }
     for relative, text in files.items():
         path = root / relative
@@ -416,6 +432,9 @@ def test_explicit_lerobot_key_patch_is_source_checked_and_idempotent(tmp_path: P
     trainer = (
         tmp_path / "src/fastwam/trainer.py"
     ).read_text(encoding="utf-8")
+    runtime = (
+        tmp_path / "src/fastwam/runtime.py"
+    ).read_text(encoding="utf-8")
     assert 'FASTWAM_DIRECT_CUDA_LOAD_ENV = "FASTWAM_DIRECT_CUDA_LOAD"' in model_loader
     assert 'in {"1", "true", "yes", "on"}' in model_loader
     assert "PyTorch 2.7.x cannot make bfloat16 the default" in model_loader
@@ -431,6 +450,8 @@ def test_explicit_lerobot_key_patch_is_source_checked_and_idempotent(tmp_path: P
     assert "provided_action_keys != expected_action_keys" in model
     assert "action_delta proprio key mismatch" in model
     assert '"true",' in trainer
+    assert "setup_logging(log_level=logging.INFO)" in runtime
+    assert 'os.environ.get("RANK", "0").strip() in {"", "0"}' in runtime
     loader = (
         tmp_path
         / "src/fastwam/datasets/lerobot/lerobot/lerobot_dataset.py"

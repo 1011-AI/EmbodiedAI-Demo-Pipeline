@@ -7,7 +7,7 @@
 
 ```bash
 cd /path/to/EmbodiedAI-Demo-Pipeline
-export BEHAVIOR1K_DATA_ROOT="$PWD/data/behavior1k/materialized/turning_on_radio"
+export BEHAVIOR1K_DATA_ROOT=/path/to/2026-challenge-demos
 export CUDA_VISIBLE_DEVICES=0
 
 python experiments/lerobot/pi05_behavior1k_task0/run.py \
@@ -23,6 +23,27 @@ python experiments/lerobot/pi05_behavior1k_task0/run.py \
 ```
 
 `--dry-run` 只打印命令；`--preflight` 才会检查数据、base、CUDA 和进程数。
+
+## 8×A800 已验证长训起点
+
+复制 `config.yaml` 作为实验配置，仅调整：
+
+```yaml
+policy:
+  gradient_checkpointing: false
+
+training:
+  steps: 30000
+  batch_size: 8
+  num_workers: 4
+  save_checkpoint: true
+  save_freq: 1000
+```
+
+用 `--num-processes 8` 启动。在 8×A800 80 GB、64 CPU 核上，50-step profile
+的稳态吞吐约为 113 samples/s（全局 batch 64）；30k step 纯训练约
+4 小时 43 分。该 profile 只验证真实反向、loss 趋势与吞吐，不代表长训
+稳定性或任务成功；真实长训不要关闭 checkpoint。
 
 ## 离线推理
 

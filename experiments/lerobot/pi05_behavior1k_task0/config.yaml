@@ -53,8 +53,8 @@ policy:
   # 短探针关闭 compile，避免首次编译时间掩盖真实数据/模型错误。
   compile_model: false
   gradient_checkpointing: true
-  # 当前 16 GB cgroup 下采用 action expert 后训练；PaliGemma VLM 冻结但仍参与
-  # 前向，训练的是真实 π0.5 action expert，不是 mock。
+  # 采用 action expert 后训练；PaliGemma VLM 冻结但仍参与前向，训练的是真实
+  # π0.5 action expert，不是 mock。8×A800 吞吐实验可关闭 gradient checkpointing。
   train_expert_only: true
   push_to_hub: false
 
@@ -63,8 +63,8 @@ training:
   # 收窄到一个 episode，并将 steps 提高到 20-100。
   steps: 2
   batch_size: 1
-  # 当前容器与其他任务共享 16 GB cgroup。worker=0 避免四个视频 worker 在
-  # checkpoint 阶段占用数 GB RSS；大内存独占实例可改回 4-8。
+  # 默认 worker=0 兼容小内存单卡首跑。已验证的 8×A800/64 核吞吐起点是
+  # batch_size=8、num_workers=4、gradient_checkpointing=false（全局 batch=64）。
   num_workers: 0
   prefetch_factor: 2
   persistent_workers: true
