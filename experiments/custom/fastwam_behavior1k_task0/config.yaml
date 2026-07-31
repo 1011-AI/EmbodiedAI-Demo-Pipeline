@@ -2,6 +2,7 @@
 #
 # 常用命令：
 #   python experiments/custom/fastwam_behavior1k_task0/run.py --dry-run
+#   python experiments/custom/fastwam_behavior1k_task0/run.py --config /path/to/pilot.yaml --dry-run
 #   python experiments/custom/fastwam_behavior1k_task0/run.py --prepare-only
 #   python experiments/custom/fastwam_behavior1k_task0/run.py --precompute-text-embeds
 #   python experiments/custom/fastwam_behavior1k_task0/run.py --dataset-smoke

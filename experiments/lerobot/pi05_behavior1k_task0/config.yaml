@@ -3,8 +3,11 @@
 # 先生成零拷贝视图和 23D stats，再检查命令：
 #   python experiments/lerobot/pi05_behavior1k_task0/run.py --dry-run
 #
+# 检查数据、权重、CUDA 和进程数，但不启动训练：
+#   python experiments/lerobot/pi05_behavior1k_task0/run.py --preflight --num-processes 1
+#
 # 启动真实训练：
-#   python experiments/lerobot/pi05_behavior1k_task0/run.py
+#   python experiments/lerobot/pi05_behavior1k_task0/run.py --num-processes 1
 #
 # 使用 checkpoint 做真实离线推理：
 #   python experiments/lerobot/pi05_behavior1k_task0/run.py --mode infer
@@ -75,7 +78,8 @@ training:
 distributed:
   # auto 优先读取平台 NPROC_PER_NODE，其次读取 CUDA_VISIBLE_DEVICES / torch。
   # 因此同一配置可在单卡、4 卡或 8 卡节点直接运行；仍可用 run.py
-  # 的 --num-processes 做一次性显式覆盖。
+  # 的 --num-processes 做一次性显式覆盖。新人第一次运行必须显式传 1，
+  # 确认链路后再启用多卡，避免 auto 占用全部可见 GPU。
   num_processes: auto
   mixed_precision: bf16
 

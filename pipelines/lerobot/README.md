@@ -1,253 +1,72 @@
 # LeRobot Pipeline
 
-LeRobot 是当前第一阶段主线：验证开源 LeRobot 生态下的 dataset read → policy train/load → offline inference → evidence report。
+LeRobot 路线尽量复用官方 dataset、policy、训练与推理接口。本项目只在边界处增加任务选择、
+R1Pro 字段适配、配置化启动、checkpoint 证据和统一 policy server。
 
-具体训练/推理命令以 [`../../docs/TRAINING_AND_INFERENCE.md`](../../docs/TRAINING_AND_INFERENCE.md) 为准。本文件只保留路线说明、入口索引和当前状态。
+第一次运行当前主线，请直接阅读
+[`../../docs/POST_TRAINING.md`](../../docs/POST_TRAINING.md)。
 
-## 当前可用链路
+## 当前主线
 
-| 链路 | 类型 | 状态 | 入口 |
-|---|---|---|---|
-| ACT / PushT | 训练 | 已在 SCUT `gpu11` 验证，2-step loss 下降 | `experiments/lerobot/pusht_act_smoke/launch.sh` |
-| Diffusion / PushT | 训练 | 入口已准备 | `experiments/lerobot/pusht_diffusion_train/launch.sh` |
-| SmolVLA / SO100 | 单机八卡/多机训练 | 入口已准备 | `experiments/lerobot/smolvla_so100_8gpu_long/launch.sh` |
-| pi05 / SO100 | 单机八卡训练测速 | 已在 `cluster_120` 验证真实 8 卡 2-step，loss `0.347 -> 0.141` | `experiments/lerobot/pi05_so100_8gpu_probe/run.py` |
-| Diffusion / PushT | 推理 | 入口已准备，依赖本地 policy | `experiments/lerobot/diffusion_pusht_infer/launch.sh` |
-| SmolVLA / SO100 | 推理 | 入口已准备，依赖本地 policy/base | `experiments/lerobot/smolvla_so100_infer/launch.sh` |
-| pi05 / SO100 | 推理 | 入口已准备，依赖本地 pi05 base/checkpoint | `experiments/lerobot/pi05_so100_infer/run.py` |
-| FastWAM / LIBERO | 推理 | 已在 SCUT `gpu11` 验证 CUDA inference | `experiments/lerobot/fastwam_libero_infer/launch.sh` |
+| 任务/模型 | 状态 | 实验入口 |
+|---|---|---|
+| BEHAVIOR-1K Task 0 / π0.5 | 真实 2-step 后训练、delta 重载、离线推理、WebSocket 服务已验证 | [`../../experiments/lerobot/pi05_behavior1k_task0/`](../../experiments/lerobot/pi05_behavior1k_task0/) |
 
-已验证 FastWAM evidence：
+数据流：
 
 ```text
-runs/experiments/lerobot/fastwam_libero_infer/20260715-210113/inference_evidence.json
-policy_type=fastwam
-device=cuda
-action.shape=[1, 7]
-latency_ms=7931.62
+BEHAVIOR LeRobotDataset v3
+  -> Task 0 episode selection
+  -> raw state 61D -> policy state 23D
+  -> head/left/right RGB + language
+  -> LeRobot π0.5 action expert post-training
+  -> base + delta reload
+  -> offline action chunk / WebSocket policy
 ```
 
-## 环境
-
-```bash
-export BASE=/mnt/gpu11_200T/dingxibo
-export PROJECT=$BASE/EmbodiedAI-Demo-Pipeline
-export CONDA=$BASE/miniconda3/bin/conda
-
-cd "$PROJECT"
-source "$BASE/miniconda3/etc/profile.d/conda.sh"
-conda activate lerobot
-
-export PROJECT_ROOT="$PROJECT"
-export EMBODIED_DATA_ROOT="$PROJECT/data"
-export EMBODIED_MODEL_ROOT="$PROJECT/models"
-export EMBODIED_RUN_ROOT="$PROJECT/runs"
-export HF_HOME="$PROJECT/hf_cache"
-export HUGGINGFACE_HUB_CACHE="$HF_HOME/hub"
-export HF_DATASETS_CACHE="$HF_HOME/datasets"
-export TORCH_HOME="$PROJECT/hf_cache/torch"
-export HF_ENDPOINT=https://hf-mirror.com
-export HF_HUB_DISABLE_XET=1
-```
-
-重建环境：
-
-```bash
-CONDA_EXE="$CONDA" LEROBOT_CREATE_CONDA=1 LEROBOT_CONDA_ENV=lerobot \
-bash scripts/lerobot/install_lerobot_cluster.sh
-```
-
-新架构 GPU / CUDA 13 wheel 节点可使用：
-
-```bash
-CONDA_EXE=/opt/conda/bin/conda \
-LEROBOT_CREATE_CONDA=1 \
-LEROBOT_CONDA_ENV=lerobot-sm120 \
-LEROBOT_INSTALL_NO_DEPS=1 \
-LEROBOT_FORCE_OPENCV_HEADLESS=1 \
-TORCH_INDEX_URL=https://download.pytorch.org/whl/cu130 \
-LEROBOT_TORCH_SPEC='torch==2.13.0+cu130' \
-LEROBOT_TORCHVISION_SPEC='torchvision==0.28.0+cu130' \
-bash scripts/lerobot/install_lerobot_cluster.sh
-```
-
-SCUT `gpu11` 需要注意：
-
-- `ffmpeg=6.*`，避免旧 glibc 节点上 `ffmpeg=8` native ABI 问题；
-- FastWAM policy 需要 `transformers` 和 `diffusers`；
-- 推理大模型时设置 `HF_HOME=$PROJECT/hf_cache`，避免访问默认用户 cache。
-
-## 资产
-
-```bash
-make download-lerobot-pusht-dataset
-make download-lerobot-svla-so100-pickplace-dataset
-make download-lerobot-diffusion-pusht-policy
-make download-lerobot-smolvla-base-policy
-make download-lerobot-pi05-base-policy
-make download-lerobot-pi05-runtime-cache
-make augment-lerobot-svla-so100-quantile-stats
-make download-lerobot-fastwam-libero-policy
-make download-lerobot-fastwam-libero-dataset
-make convert-lerobot-fastwam-libero-v3
-make download-lerobot-fastwam-base-cache
-```
-
-默认路径：
+## 入口边界
 
 ```text
-data/lerobot/pusht/
-data/lerobot/svla_so100_pickplace/
-data/lerobot/libero-fastwam/v2.1/
-data/lerobot/libero-fastwam/v3/
-
-models/lerobot/diffusion/diffusion_pusht/
-models/lerobot/smolvla/smolvla_base/
-models/lerobot/pi05/pi05_base/
-models/lerobot/fastwam/fastwam_libero_uncond_2cam224/
-
-hf_cache/hub/models--google--paligemma-3b-pt-224/
-hf_cache/hub/models--Wan-AI--Wan2.2-TI2V-5B-Diffusers/
-hf_cache/hub/models--google--umt5-xxl/
+pipelines/lerobot/behavior1k/
+├── adapter.py       # 数据集与 61D→23D 契约
+├── train.py         # 接入固定版本 LeRobot trainer
+├── checkpoint.py    # 低内存 delta 保存
+├── loading.py       # CUDA 直接加载策略
+├── infer.py         # checkpoint 离线推理
+└── serve.py         # evaluator policy server
 ```
 
-pi05 运行时还会通过 tokenizer processor 读取 `google/paligemma-3b-pt-224` 的 tokenizer/config。该 repo 可能是 gated；如果下载报 `Access denied`，先完成 Hugging Face 访问申请，并在集群侧 `hf auth login` 或设置临时 `HF_TOKEN` 后重试 `make download-lerobot-pi05-runtime-cache`。
-
-只准备 pi05/SO100 时可直接执行：
+用户不应直接调用这些底层模块。训练和推理从实验入口启动：
 
 ```bash
-make prepare-lerobot-pi05-so100-assets
+python experiments/lerobot/pi05_behavior1k_task0/run.py \
+  --dry-run --num-processes 1
+python experiments/lerobot/pi05_behavior1k_task0/run.py \
+  --preflight --num-processes 1
+python experiments/lerobot/pi05_behavior1k_task0/run.py \
+  --num-processes 1
 ```
 
-这会额外补齐本地 SO100 数据的 q01/q99 stats。该步骤只写本地 `meta/stats.json`，不会上传 Hugging Face Hub。
+## 环境与资产
 
-LeRobot 路线不直接读写 custom/FastWAM 数据：
+- 使用目标 GPU 平台兼容的 Python、Torch 和 CUDA；
+- LeRobot 源码固定在 ignored 的 `upstreams/lerobot/`；
+- base 权重位于 `models/lerobot/pi05/pi05_base/`；
+- PaliGemma processor/tokenizer 位于项目 `hf_cache/`；
+- 数据通过 `BEHAVIOR1K_DATA_ROOT` 指向完整数据或只读 Task 0 materialization；
+- GPU 节点启用 offline 模式，缺资产时直接失败，不现场下载；
+- 通用安装不得覆盖平台已经验证的 Torch/CUDA。
 
-```text
-data/custom/fastwam/libero-fastwam/
-```
+## checkpoint 语义
 
-那是 custom pipeline 的输入。
+当前受限内存模式冻结 PaliGemma 主干，训练 action expert，并保存 base + delta 推理产物。
+delta 已可用于离线推理和 policy server，但不含 optimizer/RNG，不能单独实现精确 trainer
+resume。正式长训需要完整或分片训练状态。
 
-## 训练
+## 其他 LeRobot 实验
 
-ACT / PushT：
+仓库仍保留 ACT/PushT、Diffusion/PushT、SmolVLA/SO100、π0.5/SO100 和
+FastWAM/LIBERO 等历史或补充实验。它们用于回归、生态参考和旧运行证据，不代表当前集群
+配置；不要复制带 `baige`、`cluster120` 或旧节点路径的命令。
 
-```bash
-bash experiments/lerobot/pusht_act_smoke/launch.sh
-```
-
-Diffusion / PushT：
-
-```bash
-bash experiments/lerobot/pusht_diffusion_train/launch.sh
-```
-
-SmolVLA / SO100 单机八卡：
-
-```bash
-export LEROBOT_NUM_PROCESSES=8
-export LEROBOT_BATCH_SIZE=8
-export LEROBOT_STEPS=20000
-
-bash experiments/lerobot/smolvla_so100_8gpu_long/launch.sh
-```
-
-pi05 / SO100 单机八卡测速探针：
-
-```bash
-make prepare-lerobot-pi05-so100-assets
-
-python experiments/lerobot/pi05_so100_8gpu_probe/run.py --dry-run
-python experiments/lerobot/pi05_so100_8gpu_probe/run.py
-```
-
-训练规模和多卡参数在这里改：
-
-```text
-experiments/lerobot/pi05_so100_8gpu_probe/config.yaml
-```
-
-已验证 2-step evidence：
-
-```text
-run_id=smoke2_quiet_20260716_202905
-loss=0.347 -> 0.141
-parsed_step_metrics.mean_samples_per_second=6.0
-parsed_step_metrics.max_memory_gb=45.76
-```
-
-如果只想先排错，不想把首次 `torch.compile` 编译耗时混入测速：
-
-把 `config.yaml` 中 `policy.compile_model` 设为 `false`。
-
-Slurm：
-
-```bash
-sbatch experiments/lerobot/smolvla_so100_8gpu_long/slurm.sbatch
-```
-
-## 推理
-
-Diffusion / PushT：
-
-```bash
-bash experiments/lerobot/diffusion_pusht_infer/launch.sh
-```
-
-SmolVLA / SO100：
-
-```bash
-bash experiments/lerobot/smolvla_so100_infer/launch.sh
-```
-
-pi05 / SO100：
-
-```bash
-python experiments/lerobot/pi05_so100_infer/run.py
-```
-
-FastWAM / LIBERO：
-
-```bash
-export HF_HOME="$PROJECT/hf_cache"
-export HUGGINGFACE_HUB_CACHE="$HF_HOME/hub"
-export HF_DATASETS_CACHE="$HF_HOME/datasets"
-export HF_HUB_OFFLINE=1
-export HF_DATASETS_OFFLINE=1
-export TRANSFORMERS_OFFLINE=1
-
-bash experiments/lerobot/fastwam_libero_infer/launch.sh
-```
-
-## 输出
-
-训练输出：
-
-```text
-runs/experiments/lerobot/<experiment>/<run_id>/
-├── command.txt
-├── backend_manifest.json
-├── train_stdout.log
-├── loss_summary.json
-├── speed_summary.json
-└── lerobot_output/
-```
-
-推理输出：
-
-```text
-runs/experiments/lerobot/<experiment>/<run_id>/
-├── config.sh
-└── inference_evidence.json
-```
-
-## 排障
-
-| 问题 | 处理 |
-|---|---|
-| `torchcodec` / `libavutil` / `glibc` 报错 | 固定 `ffmpeg=6.*` |
-| FastWAM policy 找不到 `transformers` / `diffusers` | 安装 fastwam extra 或 `pip install transformers diffusers` |
-| FastWAM policy 离线访问 Wan/T5 | `make download-lerobot-fastwam-base-cache`，并设置 `HF_HOME=$PROJECT/hf_cache` |
-| FastWAM LIBERO 数据格式不对 | `make convert-lerobot-fastwam-libero-v3` |
-| 计算节点不能联网 | 先在管理节点下载到项目内，再设置 offline 环境变量 |
+所有可运行入口见 [`../../experiments/README.md`](../../experiments/README.md)。

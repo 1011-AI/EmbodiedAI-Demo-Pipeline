@@ -205,8 +205,15 @@ print("FASTWAM_BEHAVIOR1K_HYDRA_CONTRACT_OK " + json.dumps(checks, sort_keys=Tru
 
 
 def main(argv: list[str] | None = None) -> int:
+    here = Path(__file__).resolve().parent
     parser = argparse.ArgumentParser(
         description="Prepare and run the real FastWAM/BEHAVIOR-1K Task 0 experiment."
+    )
+    parser.add_argument(
+        "--config",
+        type=Path,
+        default=here / "config.yaml",
+        help="训练 YAML；相对路径按项目根目录解析。",
     )
     parser.add_argument(
         "--dry-run",
@@ -247,7 +254,6 @@ def main(argv: list[str] | None = None) -> int:
             "are mutually exclusive"
         )
 
-    here = Path(__file__).resolve().parent
     project_root = find_project_root(here)
     sys.path.insert(0, str(project_root))
     sys.path.insert(0, str(project_root / "src"))
@@ -263,7 +269,12 @@ def main(argv: list[str] | None = None) -> int:
         install_task0_configs,
     )
 
-    config_path = here / "config.yaml"
+    config_path = args.config.expanduser()
+    if not config_path.is_absolute():
+        config_path = project_root / config_path
+    config_path = config_path.resolve()
+    if not config_path.is_file():
+        raise SystemExit(f"ERROR: FastWAM experiment config is missing: {config_path}")
     config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
     environment_config = config.get("environment") or {}
     if not isinstance(environment_config, dict):

@@ -1,5 +1,5 @@
 schema_version: "1.0"
-updated: "2026-07-30"
+updated: "2026-07-31"
 # 模型注册表：用于说明每条模型路线的状态、资产位置、启动入口和能力边界。
 # 它帮助团队判断“该跑哪个入口”，但不存放任何权重、数据或私密路径。
 purpose: >
@@ -31,7 +31,7 @@ storage:
 
 models:
   lerobot_pi05_behavior1k_2026:
-    status: configured_base_verified_paligemma_cache_pending_gpu_run
+    status: task0_two_step_train_inference_server_verified
     path_type: lerobot_native
     policy_type: pi05
     dataset_repo_id: behavior-1k/2026-challenge-demos
@@ -43,8 +43,9 @@ models:
     default_config: experiments/lerobot/pi05_behavior1k_task0/config.yaml
     smoke_targets:
       - python experiments/lerobot/pi05_behavior1k_task0/run.py --dry-run
-      - python experiments/lerobot/pi05_behavior1k_task0/run.py
-      - python experiments/lerobot/pi05_behavior1k_task0/run.py --mode infer
+      - python experiments/lerobot/pi05_behavior1k_task0/run.py --preflight --num-processes 1
+      - python experiments/lerobot/pi05_behavior1k_task0/run.py --num-processes 1
+      - python experiments/lerobot/pi05_behavior1k_task0/run.py --mode infer --checkpoint <pretrained_model>
     artifact_location:
       policy_path: "$EMBODIED_MODEL_ROOT/lerobot/pi05/pi05_base"
       task_view: "$EMBODIED_DATA_ROOT/behavior1k/views/r1pro_policy23/turning_on_radio"
@@ -52,15 +53,16 @@ models:
     verified_artifacts:
       model_safetensors_bytes: 14467165872
       model_safetensors_sha256: 0eb11ca9587678c1d2ef8cf32807c29f8ce53a2bfdfc1aa4a4c96f16fca59b0f
-    capability_claim: configured_real_posttraining_offline_inference_and_policy_server
+    capability_claim: task0_real_posttraining_delta_inference_and_policy_server_verified
     notes:
       - Uses LeRobot/PyTorch checkpoints; OpenPI/JAX checkpoints are not compatible.
       - Requires the gated google/paligemma-3b-pt-224 tokenizer in the project HF cache.
-      - Policy server is protocol-tested but has not yet loaded this checkpoint on the current GPU node.
-      - GPU loss decrease and checkpoint forward evidence are not yet claimed.
+      - A real two-update Task 0 run, strict base-plus-delta reload, finite offline action chunk, and real-observation WebSocket response have been verified.
+      - Two stochastic loss values do not establish a decreasing trend, convergence, or task success.
+      - The low-memory delta is inference-ready but does not contain optimizer/RNG state for exact trainer resume.
 
   fastwam_behavior1k_2026:
-    status: configured_assets_verified_pending_gpu_run
+    status: task0_one_step_train_inference_server_verified
     path_type: custom_backend
     policy_family: fastwam
     dataset_repo_id: behavior-1k/2026-challenge-demos
@@ -68,8 +70,11 @@ models:
     default_config: experiments/custom/fastwam_behavior1k_task0/config.yaml
     smoke_targets:
       - python experiments/custom/fastwam_behavior1k_task0/run.py --prepare-only
+      - python experiments/custom/fastwam_behavior1k_task0/run.py --precompute-text-embeds
       - python experiments/custom/fastwam_behavior1k_task0/run.py --dataset-smoke
       - python experiments/custom/fastwam_behavior1k_task0/run.py
+      - python experiments/custom/fastwam_behavior1k_task0/infer.py --dry-run
+      - python experiments/custom/fastwam_behavior1k_task0/infer.py
     artifact_location:
       release_weights: "$EMBODIED_MODEL_ROOT/custom/fastwam/release/libero_uncond_2cam224.pt"
       wan_runtime_assets: "$EMBODIED_MODEL_ROOT/Wan-AI"
@@ -79,12 +84,14 @@ models:
       release_checkpoint_sha256: 1000437cfcf55c000094f79a2600634c502bcb5b492476b94bf8509883a49579
       t5_encoder_bytes: 11361920418
       t5_encoder_sha256: 7cace0da2b446bbbbc57d031ab6cf163a3d59b366da94e5afe36745b746fd81d
-    capability_claim: configured_real_posttraining_inference_and_policy_server
+    capability_claim: task0_real_posttraining_delta_inference_and_policy_server_verified
     notes:
       - Reinitializes the incompatible 7D action head and old proprio input while loading shape-compatible backbone weights.
       - Every real checkpoint load must write model_load_report.json.
       - Inference reuses the native processor, exact task prompt cache, and 23D inverse-normalization path.
-      - GPU one-step training and loss evidence are not yet claimed.
+      - A real one-update Task 0 run produced finite loss and an action/proprio delta that was strictly reloaded after the release base.
+      - Offline finite action chunk and real-observation WebSocket response with deterministic reset have been verified.
+      - One loss value does not establish a trend, convergence, or task success; the delta cannot be used alone for trainer resume.
 
   # LeRobot 轻量基线：最适合第一次证明训练 loss 能下降。
   lerobot_act_pusht:

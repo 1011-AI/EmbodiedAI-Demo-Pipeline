@@ -313,7 +313,17 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, default=here / "config.yaml")
     parser.add_argument("--mode", choices=("train", "infer"), default="train")
-    parser.add_argument("--dry-run", action="store_true")
+    validation_mode = parser.add_mutually_exclusive_group()
+    validation_mode.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="只解析 YAML 并打印最终命令；不检查数据、模型或 CUDA。",
+    )
+    validation_mode.add_argument(
+        "--preflight",
+        action="store_true",
+        help="检查数据视图、模型/checkpoint、CUDA 和本地进程数，但不启动训练或推理。",
+    )
     parser.add_argument("--checkpoint", help="Override inference.checkpoint")
     parser.add_argument("--num-processes", type=int, help="Override local GPU/process count")
     args = parser.parse_args(argv)
@@ -365,6 +375,21 @@ def main(argv: list[str] | None = None) -> int:
         args.checkpoint,
         args.num_processes,
     )
+    if args.preflight:
+        resolved_processes = (
+            _resolve_local_processes(
+                args.num_processes
+                if args.num_processes is not None
+                else _mapping(config, "distributed").get("num_processes", "auto")
+            )
+            if args.mode == "train"
+            else 1
+        )
+        print(
+            "BEHAVIOR1K_PI05_PREFLIGHT_OK "
+            f"mode={args.mode} num_processes={resolved_processes}"
+        )
+        return 0
     if run_dir.exists():
         raise SystemExit(f"ERROR: run directory already exists: {run_dir}")
     run_dir.mkdir(parents=True)

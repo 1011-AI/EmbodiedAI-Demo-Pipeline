@@ -78,6 +78,7 @@ curl --fail http://POLICY_HOST:8000/healthz
 
 ## 验证边界
 
-当前 CPU 测试覆盖官方 wire codec、真实 WebSocket metadata/reset/action 交互、
-61D→23D 与三相机变换。真实 checkpoint 的加载、CUDA 推理延迟和 OmniGibson rollout
-必须在 GPU 开发机上验证；在此之前不能把 transport 单测记作模型评测通过。
+CPU 测试覆盖官方 wire codec、真实 WebSocket metadata/reset/action 交互、
+61D→23D 与三相机变换。GPU 上已经完成训练 delta 的严格重载、CUDA action chunk
+推理和真实 observation WebSocket 往返，因此可以声称 π0.5 Task 0 模型服务链路通过。
+OmniGibson rollout 尚未完成，不能把 transport 或模型服务证据记作任务成功率。

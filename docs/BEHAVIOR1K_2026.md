@@ -1,5 +1,9 @@
 # BEHAVIOR-1K 2026 后训练与评测链路
 
+第一次运行模型时先读
+[`POST_TRAINING.md`](POST_TRAINING.md)。本文保留完整数据契约、版本证据和 evaluator
+编排，不作为新人第一次训练的逐命令手册。
+
 本文档是 `EmbodiedAI-Demo-Pipeline` 接入 BEHAVIOR-1K 2026 Challenge 的稳定工程入口。
 目标不是复制官方仓库，而是在两条现有模型路线之上统一数据契约、推理协议和评测产物：
 

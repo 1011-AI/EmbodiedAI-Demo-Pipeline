@@ -28,6 +28,8 @@ LeRobotDataset v3
 
 详细版本、字段映射、检查命令和验收顺序见
 [`docs/BEHAVIOR1K_2026.md`](docs/BEHAVIOR1K_2026.md)。
+如果你第一次运行后训练，先读更短的
+[`docs/POST_TRAINING.md`](docs/POST_TRAINING.md)，不要从评测或历史集群文档开始。
 
 截至 2026-07-30 的验证边界：
 
@@ -103,9 +105,13 @@ Make 仅用于创建目录、准备环境、下载/检查资产和代码静态�
 BEHAVIOR-1K Task 0 的两个真实入口为：
 
 ```bash
-# LeRobot π0.5：config.yaml 控制训练参数、模型和 checkpoint。
-python experiments/lerobot/pi05_behavior1k_task0/run.py --dry-run
-python experiments/lerobot/pi05_behavior1k_task0/run.py
+# LeRobot π0.5：第一次显式限制单卡。
+python experiments/lerobot/pi05_behavior1k_task0/run.py \
+  --dry-run --num-processes 1
+python experiments/lerobot/pi05_behavior1k_task0/run.py \
+  --preflight --num-processes 1
+python experiments/lerobot/pi05_behavior1k_task0/run.py \
+  --num-processes 1
 
 # custom FastWAM：先在大内存管理节点生成 stats 和文本缓存。
 export BEHAVIOR1K_DATA_ROOT=/path/to/2026-challenge-demos
@@ -114,8 +120,10 @@ python experiments/custom/fastwam_behavior1k_task0/run.py --precompute-text-embe
 
 # GPU 节点只读已准备的数据和缓存；先做真实 loader smoke，再训练。
 python experiments/custom/fastwam_behavior1k_task0/run.py --dataset-smoke
-python experiments/custom/fastwam_behavior1k_task0/run.py --dry-run
-python experiments/custom/fastwam_behavior1k_task0/run.py
+FASTWAM_GPUS_PER_NODE=1 \
+  python experiments/custom/fastwam_behavior1k_task0/run.py --dry-run
+FASTWAM_GPUS_PER_NODE=1 \
+  python experiments/custom/fastwam_behavior1k_task0/run.py
 ```
 
 FastWAM 默认 one-step smoke 已在真实 Task 0 数据上完成，并产出可按 base→delta 顺序加载的
@@ -160,14 +168,11 @@ action/proprio delta。该 delta 已通过离线推理和真实 observation WebS
 ## 文档入口
 
 1. [`docs/README.md`](docs/README.md)
-2. [`docs/BEHAVIOR1K_2026.md`](docs/BEHAVIOR1K_2026.md)
-3. [`docs/BOOTSTRAP.md`](docs/BOOTSTRAP.md)
-4. [`docs/TRAINING_AND_INFERENCE.md`](docs/TRAINING_AND_INFERENCE.md)
-5. [`docs/PROJECT_STRUCTURE.md`](docs/PROJECT_STRUCTURE.md)
-6. [`docs/STORAGE_AND_ARTIFACTS.md`](docs/STORAGE_AND_ARTIFACTS.md)
-7. [`pipelines/lerobot/README.md`](pipelines/lerobot/README.md)
-8. [`pipelines/custom/README.md`](pipelines/custom/README.md)
-9. [`experiments/README.md`](experiments/README.md)
+2. [`docs/POST_TRAINING.md`](docs/POST_TRAINING.md)
+3. [`docs/BEHAVIOR1K_2026.md`](docs/BEHAVIOR1K_2026.md)
+4. [`docs/PROJECT_STRUCTURE.md`](docs/PROJECT_STRUCTURE.md)
+5. [`docs/STORAGE_AND_ARTIFACTS.md`](docs/STORAGE_AND_ARTIFACTS.md)
+6. [`experiments/README.md`](experiments/README.md)
 
 ## 工程原则
 

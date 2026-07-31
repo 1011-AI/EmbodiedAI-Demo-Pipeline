@@ -1,149 +1,100 @@
-# Custom WAM / FastWAM
+# Custom FastWAM Pipeline
 
-这是 FastWAM 在 `custom` 结构下的规范入口。后续新自研/自定义后端都按 `pipelines/custom/<backend>` 接入。
+这是 FastWAM 在 `custom` 路线下的后端。它复用公开 FastWAM/Wan 权重和真实训练代码，
+同时保留项目控制的数据适配、checkpoint 加载报告、运行目录和统一 policy 协议。
 
-## 当前定位
+第一次运行当前主线，请阅读
+[`../../../docs/POST_TRAINING.md`](../../../docs/POST_TRAINING.md)。
 
-FastWAM 这条线不是“完全从零自研模型”，而是：
+## 当前主线
 
-```text
-FastWAM official release
-  + private realrobot overlay
-  + 项目级数据/模型/日志约定
-  -> custom backend fine-tuning / evaluation evidence
-```
+| 任务/模型 | 状态 | 实验入口 |
+|---|---|---|
+| BEHAVIOR-1K Task 0 / FastWAM | 真实 1-step、base→delta 重载、离线推理、WebSocket 服务已验证 | [`../../../experiments/custom/fastwam_behavior1k_task0/`](../../../experiments/custom/fastwam_behavior1k_task0/) |
 
-## 关键路径
-
-```text
-configs/fastwam/realrobot_train_eval.sh
-scripts/fastwam/download_release_artifacts.sh
-scripts/fastwam/prepare_fastwam_overlay.sh
-scripts/fastwam/run_realrobot_train_eval.sh
-experiments/custom/fastwam_realrobot_single8_random/config.yaml
-experiments/custom/fastwam_realrobot_single8_random/run.py
-experiments/custom/fastwam_realrobot_8node_random/
-pipelines/custom/fastwam/README.md
-```
-
-## 准备资产
-
-```bash
-make download-custom-fastwam-libero-dataset
-make download-fastwam-artifacts
-FASTWAM_SOURCE_MODE=sync bash scripts/fastwam/prepare_fastwam_overlay.sh
-```
-
-`download-fastwam-artifacts` 不只下载 release ckpt/stats，也会准备 Wan2.2 VAE、Wan2.2 T5 text encoder 和 Wan2.1 tokenizer。它们是 text embedding cache 预计算的真实依赖。
-
-## 新集群测速准备
-
-如果新集群已经准备好了 Python、torch、torchvision 和 CUDA，不希望本项目脚本重装 torch，可以在已激活的环境里执行：
-
-```bash
-FASTWAM_SOURCE_MODE=sync FASTWAM_INSTALL=1 FASTWAM_CREATE_CONDA=0 \
-FASTWAM_SKIP_TORCH_INSTALL=1 FASTWAM_INSTALL_NVCC=0 \
-bash scripts/fastwam/prepare_fastwam_overlay.sh
-```
-
-这会做三件事：
-
-1. 同步官方 FastWAM 和 realrobot overlay；
-2. 安装 FastWAM 除 torch/torchvision 之外的 Python 依赖；
-3. 以 editable 方式安装 generated workspace。
-
-执行前建议先确认当前环境：
-
-```bash
-python - <<'PY'
-import torch, torchvision
-print("torch", torch.__version__)
-print("torchvision", torchvision.__version__)
-print("cuda", torch.version.cuda)
-print("cuda_available", torch.cuda.is_available())
-print("gpu_count", torch.cuda.device_count())
-PY
-```
-
-如果容器自带的是 Python 3.11，而不是推荐的 Python 3.10，可以先用于测速：
-
-```bash
-FASTWAM_SOURCE_MODE=sync FASTWAM_INSTALL=1 FASTWAM_CREATE_CONDA=0 \
-FASTWAM_SKIP_TORCH_INSTALL=1 FASTWAM_INSTALL_NVCC=0 \
-FASTWAM_ALLOW_PYTHON_MINOR_MISMATCH=1 \
-bash scripts/fastwam/prepare_fastwam_overlay.sh
-```
-
-注意：这只是快速兼容模式。长期正式实验仍建议使用 Python 3.10 环境，减少 DeepSpeed、CUDA extension 和上游依赖的隐性兼容风险。
-
-## 日志和编译缓存
-
-当前集群上 `torchcodec` 能被 Python 发现，但缺少匹配的 FFmpeg `libavutil`，所以 upstream LeRobot 默认路径会先打印一大段 torchcodec loading traceback，再回退到 `pyav`。本项目默认：
-
-```yaml
-fastwam:
-  video_backend: pyav
-  suppress_video_warnings: true
-```
-
-同时 `prepare_fastwam_overlay.sh` 会给 generated workspace 打一个很小的兼容补丁，让 `FASTWAM_VIDEO_BACKEND=pyav` 从源头生效。更新代码后在集群执行一次：
-
-```bash
-FASTWAM_SOURCE_MODE=reuse FASTWAM_INSTALL=0 bash scripts/fastwam/prepare_fastwam_overlay.sh
-```
-
-训练前的 Torch/DeepSpeed/Triton 扩展编译不能完全省掉；第一次运行或升级 Python/Torch/CUDA 后仍会编译。本项目把缓存固定到：
+这不是从零自研模型：
 
 ```text
-.cache/torch_extensions/fastwam
-.cache/triton/fastwam
+FastWAM release checkpoint
+  + 固定 FastWAM-realrobot workspace
+  + BEHAVIOR Task 0 三路 RGB / 23D state-action
+  -> action-only post-training
+  -> release base + action/proprio delta
 ```
 
-这些目录在项目内、由 `.gitignore` 忽略。只要共享盘缓存不被删，同一环境的后续实验应复用缓存，不应每次重新编译。
+release 中 shape 兼容的 backbone 会真实加载。LIBERO 的 7D action 和旧 8D proprio
+不兼容张量会被明确跳过并重新初始化；每次真实加载都写
+`model_load_report.json`，不能静默忽略。
 
-如果同一节点上已有未结束的 `torchrun`，可能占用默认端口。可以不改 YAML，直接用环境变量换端口：
-
-```bash
-FASTWAM_MASTER_PORT=29600 FASTWAM_TEXT_EMBED_MASTER_PORT=29617 \
-python experiments/custom/fastwam_realrobot_single8_random/run.py
-```
-
-如果日志出现 `gpu_arch=sm_120` 但 `torch_supported_arches` 只到 `sm_90`，说明当前 PyTorch wheel 不支持这张 GPU。此时不要继续测速，应该切换到支持该 GPU 架构的 PyTorch/CUDA 环境。
-
-## 启动实验
-
-训练/评测入口放在 `experiments/`，不要用 Makefile 启动：
-
-```bash
-python experiments/custom/fastwam_realrobot_single8_random/run.py --dry-run
-python experiments/custom/fastwam_realrobot_single8_random/run.py
-```
-
-当前默认入口是 `init=random`，用于验证真实训练链路：数据读取、text cache、8 卡训练、loss、checkpoint。它不是 release checkpoint 微调。
-
-如果要做正式微调，建议复制 `fastwam_realrobot_single8_random/` 新建实验，然后在 `config.yaml` 中设置：
-
-```yaml
-fastwam:
-  init: release
-  extra_overrides:
-    - resume=/mnt/.../models/custom/fastwam/release/libero_uncond_2cam224.pt
-    - learning_rate=3e-5
-```
-
-8 机 × 8 卡随机初始化：
-
-```bash
-sbatch experiments/custom/fastwam_realrobot_8node_random/slurm.sbatch
-```
-
-等价关键开关：
+## 用户入口
 
 ```text
-FASTWAM_RECIPE=v6_scratch
-FASTWAM_INIT=random
-FASTWAM_NNODES=8
-FASTWAM_GPUS_PER_NODE=8
+experiments/custom/fastwam_behavior1k_task0/
+├── config.yaml       # 数据、训练模式、分布式和低内存开关
+├── run.py            # prepare / dataset smoke / train
+├── inference.yaml    # checkpoint、推理和 server 参数
+└── infer.py          # offline inference / WebSocket server
 ```
 
-注意：private overlay clone 需要 GitHub 私有仓库权限。
+用户不要直接执行 `train_zero1.sh` 或手写长串 Hydra 参数。配置化入口会依次调用：
+
+```text
+experiment run.py
+  -> scripts/fastwam/run_config.py
+  -> scripts/fastwam/run_realrobot_train_eval.sh
+  -> pinned upstream trainer
+```
+
+## 最短训练流程
+
+管理节点：
+
+```bash
+export BEHAVIOR1K_DATA_ROOT=/path/to/2026-challenge-demos
+python experiments/custom/fastwam_behavior1k_task0/run.py --prepare-only
+python experiments/custom/fastwam_behavior1k_task0/run.py --precompute-text-embeds
+```
+
+GPU 节点：
+
+```bash
+export BEHAVIOR1K_DATA_ROOT="$PWD/data/behavior1k/materialized/turning_on_radio"
+export CUDA_VISIBLE_DEVICES=0
+
+python experiments/custom/fastwam_behavior1k_task0/run.py --dataset-smoke
+FASTWAM_GPUS_PER_NODE=1 \
+  python experiments/custom/fastwam_behavior1k_task0/run.py --dry-run
+FASTWAM_GPUS_PER_NODE=1 \
+  python experiments/custom/fastwam_behavior1k_task0/run.py
+```
+
+## 环境与缓存
+
+- 使用平台兼容的系统 Python/Torch/CUDA；
+- `.venv_fastwam` 可以只是非 Torch 依赖 overlay，入口会自动解析其
+  `site-packages`；
+- 固定 workspace 位于 `upstreams/FastWAM-realrobot/`；
+- release checkpoint 位于
+  `models/custom/fastwam/release/libero_uncond_2cam224.pt`；
+- Wan VAE、UMT5 encoder 和 tokenizer 位于 `models/Wan-AI/`；
+- 23D stats 与精确 task text cache 位于
+  `data/custom/fastwam/behavior1k/`；
+- Torch/Triton 编译缓存固定在项目 `.cache/`，环境未变化时应复用；
+- 训练节点 offline，缺资产时直接失败。
+
+## checkpoint 语义
+
+当前 `low_memory_checkpoint: true` 只保存 action expert/proprio delta。推理必须：
+
+```text
+release/base -> delta
+```
+
+delta 不含完整 optimizer/scheduler 状态，也不能单独作为 trainer resume。每次 pilot
+目前都应从 release/base 开始；可恢复长训需要后续实现 base→delta 双预载或完整分片训练
+状态。
+
+## 历史 LIBERO 路线
+
+仓库仍保留 FastWAM/LIBERO、旧单机八卡和旧多节点实验，作为回归与历史证据。它们的数据、
+动作维度和集群参数与当前 BEHAVIOR 主线不同，不能混用 checkpoint 或照抄旧节点命令。

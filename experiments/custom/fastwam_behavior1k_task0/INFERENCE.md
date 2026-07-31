@@ -24,10 +24,7 @@ cd /workspace/EmbodiedAI-Demo-Pipeline
 export BEHAVIOR1K_DATA_ROOT="$PWD/data/behavior1k/materialized/turning_on_radio"
 export FASTWAM_NATIVE_RUN_DIR=/absolute/path/to/native/run
 
-/workspace/miniconda3/envs/fastwam/bin/python \
-  experiments/custom/fastwam_behavior1k_task0/infer.py \
-  --dry-run
-
+python experiments/custom/fastwam_behavior1k_task0/infer.py --dry-run
 python experiments/custom/fastwam_behavior1k_task0/infer.py
 ```
 
@@ -113,9 +110,8 @@ python experiments/custom/fastwam_behavior1k_task0/infer.py --mode serve
 
 ## 验证边界
 
-本地无 GPU 的 pytest 只覆盖路径解析、official evaluator observation key、
-23D/chunk 协议、dry-run 和真实上游调用路径的静态回归。只有在 GPU 上生成
-`validation_status: gpu_executed` 的 `inference_evidence.json` 后，才能声称
-FastWAM checkpoint 离线推理已实际通过；完成一次官方 OmniGibson rollout 前，
-也不能声称闭环评测通过。目前 simulator 环境、资产以及 NVIDIA Isaac Sim / BEHAVIOR
-交互许可尚未准备完成，因此真实 rollout 仍是外部阻塞项，不是模型服务已通过的证据。
+GPU 上已经生成 `validation_status: gpu_executed` 的真实
+`inference_evidence.json`，并完成真实 observation WebSocket 往返；因此可以声称
+FastWAM Task 0 checkpoint 离线推理与服务链路通过。完成一次官方 OmniGibson rollout
+前仍不能声称闭环评测或任务成功。目前 simulator 环境、资产以及 NVIDIA Isaac Sim /
+BEHAVIOR 交互许可尚未准备完成，因此真实 rollout 仍是外部阻塞项。

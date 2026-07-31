@@ -91,3 +91,20 @@ def test_runtime_enables_direct_cuda_checkpoint_loading(
 
     assert environment["BEHAVIOR1K_PI05_DIRECT_CUDA_LOAD"] == "1"
     assert environment["BEHAVIOR1K_PI05_DELTA_CHECKPOINT"] == "1"
+
+
+def test_preflight_checks_contract_without_starting_run(
+    monkeypatch,
+    capsys,
+) -> None:
+    runner = _load_runner()
+    calls: list[tuple[str, int | None]] = []
+
+    def fake_preflight(config, project_root, mode, checkpoint, num_processes):
+        calls.append((mode, num_processes))
+
+    monkeypatch.setattr(runner, "_preflight", fake_preflight)
+
+    assert runner.main(["--preflight", "--num-processes", "1"]) == 0
+    assert calls == [("train", 1)]
+    assert "BEHAVIOR1K_PI05_PREFLIGHT_OK" in capsys.readouterr().out

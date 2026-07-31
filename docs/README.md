@@ -7,12 +7,11 @@
 | 文档 | 用途 |
 |---|---|
 | [`../README.md`](../README.md) | 项目现在是什么，怎么快速跑 |
+| [`POST_TRAINING.md`](POST_TRAINING.md) | 第一次运行 π0.5/FastWAM 后训练、checkpoint 重载和离线推理 |
 | [`BEHAVIOR1K_2026.md`](BEHAVIOR1K_2026.md) | 2026 Challenge 数据、π0.5/FastWAM 后训练与闭环评测主入口 |
 | [`PROJECT_STRUCTURE.md`](PROJECT_STRUCTURE.md) | 仓库结构，LeRobot / Custom 两条线怎么分 |
 | [`STORAGE_AND_ARTIFACTS.md`](STORAGE_AND_ARTIFACTS.md) | 数据、权重、cache、runs 分别放哪里 |
-| [`../pipelines/lerobot/README.md`](../pipelines/lerobot/README.md) | LeRobot 主线说明和入口索引 |
 | [`../experiments/README.md`](../experiments/README.md) | 训练/推理实验从哪里启动，结果怎么存 |
-| [`../pipelines/custom/README.md`](../pipelines/custom/README.md) | Custom WAM 主线怎么跑 |
 
 ## 需要细节时读
 
@@ -38,6 +37,7 @@ profile、路径和环境名。当前部署不得照抄：
 ## 当前最重要的事实
 
 - 当前开发主线和验收顺序以 [`BEHAVIOR1K_2026.md`](BEHAVIOR1K_2026.md) 为准；
+- 第一次实际操作从 [`POST_TRAINING.md`](POST_TRAINING.md) 开始，不需要先理解 evaluator；
 - 日常启动遵循“实验目录自包含”约定：优先使用 `experiments/<route>/<experiment>/config.yaml + run.py`；
 - BEHAVIOR-1K 2026 原始数据保持只读，两条模型路线共用零拷贝任务视图和 R1Pro 23D policy contract；
 - LeRobot π0.5 与 custom FastWAM 必须分别完成短训、checkpoint 重载、离线推理后，才进入同一套闭环 evaluator；
