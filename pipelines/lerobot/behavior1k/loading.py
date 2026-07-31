@@ -217,6 +217,13 @@ def _call_with_distributed_load_strategy(
             if synchronize is not None:
                 synchronize()
             gc.collect()
+            empty_cache = getattr(torch_module.cuda, "empty_cache", None)
+            if empty_cache is not None:
+                # Loading a safetensors state dict directly on CUDA briefly
+                # holds both source tensors and module parameters. Releasing
+                # the allocator cache here prevents that peak from accumulating
+                # once per rank while the remaining ranks wait to load.
+                empty_cache()
         distributed.barrier()
     if policy is None:  # pragma: no cover - defensive invariant.
         raise BehaviorLeRobotAdapterError(

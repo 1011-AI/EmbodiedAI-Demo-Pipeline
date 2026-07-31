@@ -202,6 +202,10 @@ def test_distributed_direct_load_is_serialized_under_small_cgroup(
         def synchronize() -> None:
             events.append("synchronize")
 
+        @staticmethod
+        def empty_cache() -> None:
+            events.append("empty_cache")
+
     fake_torch = SimpleNamespace(distributed=FakeDistributed(), cuda=FakeCuda())
     monkeypatch.delenv(loading.SERIALIZE_DISTRIBUTED_LOAD_ENV, raising=False)
     monkeypatch.setattr(loading, "_cgroup_memory_limit_bytes", lambda: 16 * 1024**3)
@@ -212,7 +216,14 @@ def test_distributed_direct_load_is_serialized_under_small_cgroup(
     )
 
     assert result == "policy"
-    assert events == ["barrier", "load", "synchronize", "barrier", "barrier"]
+    assert events == [
+        "barrier",
+        "load",
+        "synchronize",
+        "empty_cache",
+        "barrier",
+        "barrier",
+    ]
 
 
 def test_distributed_direct_load_serialization_can_be_disabled(
