@@ -226,6 +226,25 @@ def test_distributed_direct_load_is_serialized_under_small_cgroup(
     ]
 
 
+def test_distributed_load_auto_serializes_at_eight_gib_per_rank(
+    monkeypatch,
+) -> None:
+    fake_torch = object()
+    monkeypatch.delenv(loading.SERIALIZE_DISTRIBUTED_LOAD_ENV, raising=False)
+    monkeypatch.setattr(
+        loading,
+        "_distributed_load_context",
+        lambda _torch: (object(), 0, 4),
+    )
+    monkeypatch.setattr(
+        loading,
+        "_cgroup_memory_limit_bytes",
+        lambda: 32 * 1024**3,
+    )
+
+    assert loading._serialize_distributed_load_requested(fake_torch) is True
+
+
 def test_distributed_direct_load_serialization_can_be_disabled(
     monkeypatch,
 ) -> None:

@@ -169,7 +169,7 @@ def _serialize_distributed_load_requested(
 
     Even direct-to-CUDA safetensors loading has a short-lived CPU/RSS cost. If
     every DDP rank pays it at once, an otherwise valid 8-GPU job can exceed a
-    small pod cgroup. ``auto`` serializes when the cgroup provides less than
+    small pod cgroup. ``auto`` serializes when the cgroup provides at most
     8 GiB per rank; callers can force or disable it with the environment flag.
     """
 
@@ -191,7 +191,7 @@ def _serialize_distributed_load_requested(
             f"{SERIALIZE_DISTRIBUTED_LOAD_ENV} must be auto/true/false, got {value!r}"
         )
     limit = _cgroup_memory_limit_bytes()
-    return limit is not None and limit < context[2] * 8 * _GIB
+    return limit is not None and limit <= context[2] * 8 * _GIB
 
 
 def _call_with_distributed_load_strategy(
