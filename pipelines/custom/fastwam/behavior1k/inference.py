@@ -790,12 +790,15 @@ class FastWAMBehaviorPolicy:
         torch = self._torch
         raw_state, raw_images = extract_evaluator_observation(observation)
         state = torch.from_numpy(_raw_state_array(raw_state, np))
-        num_obs_steps = int(self.processor.num_obs_steps)
+        state_steps = int(self.processor.num_obs_steps)
+        image_step_count = int(
+            getattr(self.processor, "num_image_steps", None) or state_steps
+        )
         image_steps = {}
         for camera_name in FASTWAM_CAMERA_NAMES:
             image = torch.from_numpy(_rgb_uint8_chw(raw_images[camera_name], np))
             image_steps[camera_name] = image.unsqueeze(0).repeat(
-                num_obs_steps,
+                image_step_count,
                 1,
                 1,
                 1,
@@ -804,17 +807,17 @@ class FastWAMBehaviorPolicy:
         processed = self.processor.preprocess(
             {
                 "state": {
-                    "default": state.unsqueeze(0).repeat(num_obs_steps, 1),
+                    "default": state.unsqueeze(0).repeat(state_steps, 1),
                 },
                 "images": image_steps,
-                "state_is_pad": torch.zeros(num_obs_steps, dtype=torch.bool),
-                "image_is_pad": torch.zeros(num_obs_steps, dtype=torch.bool),
+                "state_is_pad": torch.zeros(state_steps, dtype=torch.bool),
+                "image_is_pad": torch.zeros(image_step_count, dtype=torch.bool),
                 "idx": 0,
                 "task": self.task_instruction,
             }
         )
         cameras = processed["pixel_values"]  # [3,T,3,224,224], range [0,1]
-        if tuple(cameras.shape[:3]) != (3, num_obs_steps, 3):
+        if tuple(cameras.shape[:3]) != (3, image_step_count, 3):
             raise FastWAMBehaviorContractError(
                 "FastWAM processor returned invalid camera tensor: "
                 f"{tuple(cameras.shape)}"

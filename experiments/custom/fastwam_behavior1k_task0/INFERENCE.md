@@ -61,26 +61,28 @@ python experiments/custom/fastwam_behavior1k_task0/infer.py
 运行路径。训练和推理命令都不需要手写 `PYTHONPATH`。若当前 conda/venv 本身已完整安装
 依赖，项目内 overlay 可以不存在；需要换位置时设置 `FASTWAM_PYTHON_OVERLAY`。
 
-## 已验证结果（2026-07-30）
+## 已验证结果（2026-08-03）
 
-真实 Task 0 action-only smoke 完成 1 个训练 step，记录 loss `0.8314`。这只验证前向、
-反向、更新和保存路径，不足以判断 loss 是否正常下降、模型是否收敛或任务是否成功。
+最新推理验收使用真实 Task 0 action-only B8/W6/GC-off 的 step-160 delta；对应训练
+loss 为 `2.3770→0.2836`。该结果证明 checkpoint 可用和短训 loss 下降，不用于宣称
+收敛或任务成功。
 
 推理按 release/base→delta 顺序加载：
 
 | 产物或检查 | 已验证结果 |
 |---|---|
 | release/base | `12,041,735,140` bytes；loaded `1647`、shape mismatch / reinitialized `4`、missing / unexpected `0` |
-| action/proprio delta | `2,042,148,165` bytes；`checkpoint_scope=action_delta`；loaded `826`、inherited from base `825`、shape mismatch / missing / reinitialized `0` |
-| 离线输出 | finite、contiguous `float32[32,23]`，单次耗时约 `25.07 s` |
+| action/proprio delta | `2,042,148,229` bytes；`checkpoint_scope=action_delta`；loaded `826`、inherited from base `825`、shape mismatch / missing / reinitialized `0` |
+| 离线输出 | finite、contiguous `float32[32,23]`，单次模型推理约 `2.46 s` |
 | WebSocket 输入 | 真实 Task 0 episode 0/frame 0：61D state、head RGB、left wrist RGB、right wrist RGB |
 | WebSocket 输出 | finite `float32[23]`；reset 后输出完全一致，最大绝对差为 `0` |
 
-训练外层记录位于
-`runs/experiments/custom/fastwam_behavior1k_task0/fastwam_behavior1k_task0_gpu3_direct_20260730_145405/`。
-离线推理证据是其中的 `inference/inference_evidence.json`，真实帧服务探针证据是
-`inference/websocket_frame0_evidence.json`；这些运行资产被 Git 忽略。`25.07 s` 是单次
-离线探针，不是正式吞吐 benchmark。
+最新训练外层记录位于
+`runs/profiles/custom/fastwam_behavior1k_task0/verify_fastwam_sparse_b8w6_nogc_20260803/`，
+native run 位于上游 workspace 的同名目录。离线推理证据写入
+`runs/experiments/custom/fastwam_behavior1k_task0/inference/inference_evidence.json`；
+真实帧 WebSocket 服务探针沿用 2026-07-30 的证据。这些运行资产被 Git 忽略；
+`2.46 s` 是单次离线探针，不是正式 latency benchmark。
 
 delta 当前是推理就绪产物，不是可独立续训的完整 checkpoint。trainer 的 native 配置会在
 `skip_dit_load_from_pretrain=true` 时跳过 video expert 预训练载入；若只把 delta 填入

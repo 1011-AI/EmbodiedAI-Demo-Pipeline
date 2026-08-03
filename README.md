@@ -31,13 +31,13 @@ LeRobotDataset v3
 如果你第一次运行后训练，先读更短的
 [`docs/POST_TRAINING.md`](docs/POST_TRAINING.md)，不要从评测或历史集群文档开始。
 
-截至 2026-07-30 的验证边界：
+截至 2026-08-03 的验证边界：
 
 | 环节 | 状态 | 已取得的证据 | 尚不能声称 |
 |---|---|---|---|
 | Task 0 数据 | 已验证 | `turning_on_radio` 的 200 episodes、429,928 frames 已映射为 23D state/action；真实 loader 可读取三路 RGB | 全部 100 个任务均已训练 |
 | LeRobot π0.5 | 训练/推理链路已验证 | 真实数据 2-step 后训练、delta checkpoint 重载、离线 `[1,32,23]` action chunk、真实样本 WebSocket `float32[23]` 响应均已完成 | 两个 step 不能证明 loss 正常下降、收敛或任务成功 |
-| custom FastWAM | 训练/推理/服务链路已验证 | 真实数据 1-step 后训练得到 loss `0.8314`；约 12 GB release base 与约 2.04 GB action/proprio delta 已按 base→delta 顺序重载；离线输出 finite `float32[32,23]`，真实样本 WebSocket 输出 finite `float32[23]` 且 reset 可重复 | 单个 step 不能证明 loss 正常下降、收敛或任务成功；delta 不能单独用于 trainer resume；未做 simulator rollout |
+| custom FastWAM | 训练/推理/服务链路已验证 | 真实 Task 0 的 160-step action-only 长测 loss `2.3770→0.2836`，8×A800 累计 `54.63 samples/s`；约 12 GB release base 与约 2.04 GB action/proprio delta 已按 base→delta 顺序重载；离线和 WebSocket 均输出 finite 23D action | 短训 loss 下降不等于收敛或任务成功；delta 不能单独用于 trainer resume；未做 simulator rollout |
 | 官方 evaluator | 编排 dry-run 已验证 | BEHAVIOR-1K `v3.9.1`、Task 0 public indices 0–19 的命令与产物/续跑契约已检查 | 未安装完整 simulator 环境/资产，也未完成许可交互，因此没有真实 OmniGibson rollout 或 Challenge 成功率 |
 
 第一阶段只解码三路 RGB；Depth 保留在源数据中但不进入训练。可视化不阻塞训练与评测验收，
@@ -126,10 +126,11 @@ FASTWAM_GPUS_PER_NODE=1 \
   python experiments/custom/fastwam_behavior1k_task0/run.py
 ```
 
-FastWAM 默认 one-step smoke 已在真实 Task 0 数据上完成，并产出可按 base→delta 顺序加载的
-action/proprio delta。该 delta 已通过离线推理和真实 observation WebSocket 往返，但它只
-是推理就绪的低内存产物，不能单独作为 trainer 的 `resume`；一个 loss 值也不能用来判断
-下降趋势。真实 BEHAVIOR simulator rollout 仍需先完成官方环境、资产和许可准备。
+FastWAM 默认 one-step smoke 与 8×A800 的 160-step pilot 均已在真实 Task 0 数据上完成，
+并产出可按 base→delta 顺序加载的 action/proprio delta。当前 `pilot/full` 使用 B8/W6、
+sparse RGB decode 并关闭 action-only 路线中无收益的 gradient checkpointing。delta 已通过
+离线推理和真实 observation WebSocket 往返，但它不能单独作为 trainer 的 `resume`；
+真实 BEHAVIOR simulator rollout 仍需先完成官方环境、资产和许可准备。
 
 ## 目录结构
 

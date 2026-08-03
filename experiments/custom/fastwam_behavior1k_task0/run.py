@@ -67,6 +67,7 @@ def _run_dataset_smoke(
     project_root: Path,
     source_root: Path,
     task_name: str,
+    expected_image_steps: int,
 ) -> int:
     code = r'''
 import os
@@ -91,7 +92,9 @@ actual = {
     "proprio": tuple(sample["proprio"].shape),
 }
 expected = {
-    "pixel_values": (3, 33, 3, 224, 224),
+    # RGB timestamps are sparsified before decode: 0,4,...,32.  State and
+    # action retain the original 33/32-step horizons.
+    "pixel_values": (3, int(os.environ["FASTWAM_EXPECTED_IMAGE_STEPS"]), 3, 224, 224),
     "action": (32, 23),
     "proprio": (33, 23),
 }
@@ -104,6 +107,7 @@ print(f"FASTWAM_BEHAVIOR1K_DATASET_SMOKE_OK shapes={actual}")
         {
             "FASTWAM_SOURCE_ROOT": str(source_root),
             "FASTWAM_BEHAVIOR_TASK_CONFIG": task_name,
+            "FASTWAM_EXPECTED_IMAGE_STEPS": str(expected_image_steps),
             "FASTWAM_DATASET_SMOKE_WORK_DIR": str(
                 project_root / "runs/tmp/fastwam_behavior1k_dataset_smoke"
             ),
@@ -290,6 +294,13 @@ def main(argv: list[str] | None = None) -> int:
             }
         )
     behavior = config["behavior1k"]
+    if not isinstance(behavior, dict):
+        raise SystemExit("ERROR: behavior1k must be a YAML mapping")
+    sparse_video_decode = behavior.get("sparse_video_decode", True)
+    if not isinstance(sparse_video_decode, bool):
+        raise SystemExit(
+            "ERROR: behavior1k.sparse_video_decode must be YAML true or false"
+        )
     paths = config["paths"]
     root_env = str(behavior["dataset_root_env"])
     raw_dataset_root = os.environ.get(root_env, "").strip()
@@ -345,6 +356,7 @@ def main(argv: list[str] | None = None) -> int:
             task_instruction=task_instruction,
             norm_stats_path=stats_path,
             text_embedding_cache_dir=text_cache,
+            sparse_video_decode=sparse_video_decode,
         )
         print(
             "FASTWAM_BEHAVIOR1K_ADAPTER_READY "
@@ -470,6 +482,9 @@ def main(argv: list[str] | None = None) -> int:
             project_root=project_root,
             source_root=source_root,
             task_name=FASTWAM_TASK_CONFIG_NAME,
+            expected_image_steps=(
+                9 if sparse_video_decode else 33
+            ),
         )
 
     runner = project_root / "scripts/fastwam/run_config.py"

@@ -39,14 +39,14 @@ official JSON/video + project run manifest/summary
 
 ## 当前验证状态
 
-以下状态来自 2026-07-30 的真实数据、模型和 GPU 运行，不把静态检查、dry-run 或协议
-smoke 冒充成训练/评测结果。
+以下状态汇总 2026-07-30 的端到端探针与 2026-08-03 的 8×A800 长 profile，
+不把静态检查、dry-run 或协议 smoke 冒充成训练/评测结果。
 
 | 路线 | 已验证 | 未完成或受阻 |
 |---|---|---|
 | 数据 | 完整数据 mount 可读；Task 0 有 200 episodes、429,928 frames、2 个实际引用的 data shards；物化视图约 1.9 GB；LeRobot 和 FastWAM loader 均读取过真实样本 | 其余 99 个任务尚未逐一做训练级验证 |
 | LeRobot π0.5 | 用真实 Task 0 数据完成 2-step expert-only 后训练；保存并严格重载 delta checkpoint；离线推理得到 finite `[1,32,23]`；policy server 用真实 episode 0/frame 0 observation 返回 finite `float32[23]` | 仅两个随机训练 step，loss 为 `0.173`、`0.463`，不能据此声称 loss 正常下降、收敛或任务成功；未做 simulator rollout |
-| custom FastWAM | 用真实 Task 0 数据完成 1-step action-only 后训练，loss 为 `0.8314`；约 12 GB release base 与约 2.04 GB action/proprio delta 已按 base→delta 顺序重载；离线推理得到 finite `float32[32,23]`；policy server 用真实 episode 0/frame 0 observation 返回 finite `float32[23]`，reset 后结果可重复 | 仅一个训练 step，不能据此声称 loss 正常下降、收敛或任务成功；delta 只完成推理重载，不能直接作为 trainer 的单一 resume；未做 simulator rollout |
+| custom FastWAM | 真实 Task 0 action-only 后训练完成多组 120/160-step profile；当前 B8/W6/GC-off 长测 loss `2.3770→0.2836`，累计 `54.63 samples/s`；其 step-160 delta 已按约 12 GB release base→约 2.04 GB delta 重载并输出 finite `float32[32,23]`；policy server 也已返回 finite 23D action | loss 在该短训中明确下降，但尚未证明收敛或任务成功；delta 不能单独作为 trainer resume；未做 simulator rollout |
 | evaluator | 独立 BEHAVIOR-1K checkout 已固定到 `v3.9.1`；Task 0 public indices 0–19 的编排 dry-run 和本项目 WebSocket contract smoke 已通过 | simulator Python 环境、OmniGibson/Isaac Sim 资产及必要许可/数据条款尚未准备，未执行任何真实官方 rollout，也没有成功率 |
 
 π0.5 本次训练证据位于
@@ -54,7 +54,9 @@ smoke 冒充成训练/评测结果。
 `runs/experiments/lerobot/pi05_behavior1k_task0/20260730_140910_622779/inference/`。
 FastWAM 本次训练外层记录位于
 `runs/experiments/custom/fastwam_behavior1k_task0/fastwam_behavior1k_task0_gpu3_direct_20260730_145405/`，
-离线推理和服务探针证据位于该实验的 `inference/` 目录。
+离线推理和服务探针证据位于该实验的 `inference/` 目录。2026-08-03 的性能与
+loss 证据位于 ignored 的
+`runs/profiles/custom/fastwam_behavior1k_task0/verify_fastwam_sparse_b8w6_nogc_20260803/`。
 这些目录是运行资产并被 Git 忽略；公开仓库提供生成它们的配置、入口和校验逻辑，而不提交
 模型权重或运行大文件。
 
@@ -500,7 +502,7 @@ python experiments/custom/fastwam_behavior1k_task0/run.py
 已验证的真实 dataset smoke 输出为：
 
 ```text
-pixel_values: (3, 33, 3, 224, 224)
+pixel_values: (3, 9, 3, 224, 224)
 action:       (32, 23)
 proprio:      (33, 23)
 ```
@@ -510,21 +512,21 @@ Task 0 文本缓存只包含完整 instruction 对应的一个 T5 context，位�
 来生成该缓存。
 
 显式低内存开关会直接在目标 CUDA/bfloat16 device 构造并加载大权重，从而避开默认
-CPU-first 路径的 cgroup 内存峰值；普通大内存环境仍可关闭该开关回到上游路径。2026-07-30
-的真实结果如下：
+CPU-first 路径的 cgroup 内存峰值；普通大内存环境仍可关闭该开关回到上游路径。真实结果
+如下：
 
 | 检查 | 结果 |
 |---|---|
 | release/base | `12,041,735,140` bytes；load report 为 loaded `1647`、shape mismatch `4`、reinitialized `4`、missing `0`、unexpected `0` |
 | 23D 适配 | 3 个 7D action 参数和 1 个 8D proprio 参数不兼容，均被明确记录并重新初始化 |
-| 后训练 | 真实 Task 0 action-only 训练完成 1 step，loss `0.8314` |
+| 后训练 | 2026-08-03 的 8×A800 B8/W6/GC-off 真实 160-step：loss `2.3770→0.2836`（下降 88.07%），累计 `54.63 samples/s`，step 50 后约 `56.77 samples/s` |
 | action/proprio delta | `2,042,148,165` bytes，`checkpoint_scope=action_delta`；load report 为 loaded `826`、inherited from base `825`、shape mismatch `0`、missing `0`、reinitialized `0` |
-| 离线推理 | 按 release/base→delta 顺序重载，得到 finite、contiguous `float32[32,23]`；单次耗时约 `25.07 s`，不是正式 benchmark |
+| 离线推理 | 最新 B8/160-step delta 按 release/base→delta 顺序重载，得到 finite、contiguous `float32[32,23]`；单次模型推理约 `2.46 s`，不是正式 latency benchmark |
 | WebSocket 服务 | 输入真实 Task 0 episode 0/frame 0 的 61D state 和三路 RGB，返回 finite `float32[23]`；reset 后 action 完全一致，最大绝对差为 `0` |
 
-这组证据证明训练反向、低内存 checkpoint、严格重载、离线 action chunk 和统一 policy
-server 已串联成功。它不证明 loss 趋势或任务成功：`0.8314` 只有一个 step，`25.07 s`
-也只是一次离线探针。delta 只包含 action expert/proprio 相关状态；推理时必须先加载
+这组证据证明训练反向、loss 在 160-step pilot 中下降、低内存 checkpoint、严格重载、
+离线 action chunk 和统一 policy server 已串联成功。它仍不证明模型收敛或仿真任务成功；
+`2.46 s` 也只是一次离线探针。delta 只包含 action expert/proprio 相关状态；推理时必须先加载
 release/base，再覆盖 delta。它不能直接作为 trainer 的单一 `resume`，否则在当前 native
 训练配置下 video expert 会保持随机初始化；续训需要实现 base→delta 双预载，或保存完整
 训练状态。
@@ -574,9 +576,9 @@ rollout 数量计算，并支持按 instance 续跑。
    stats、物化视图和两条路线的真实 loader。
 2. **部分完成：π0.5 后训练与推理。** 2-step、checkpoint、offline inference 和 server
    probe 已完成；下一步补固定小样本 overfit/更长 pilot，确认可重复的 loss 趋势。
-3. **已完成：FastWAM 基础后训练与推理链路。** 真实 one-step、base→delta checkpoint
-   重载、offline inference 和 server probe 已完成；下一步补固定小样本 overfit/更长
-   pilot，并实现可恢复的 base→delta 续训语义。
+3. **已完成：FastWAM 基础后训练与推理链路。** base→delta checkpoint 重载、offline
+   inference、server probe 和真实 160-step loss/吞吐验证均已完成；下一步做固定小样本
+   overfit 或 simulator rollout，并实现可恢复的 base→delta 续训语义。
 4. **受外部环境阻塞：真实 evaluator。** 由用户完成 simulator 环境、资产与许可准备后，
    先跑 π0.5 的单 public instance、10-step smoke，再跑完整单 instance。
 5. **模型对齐评测。** 两条路线都已达到基础训练/推理门槛；simulator 环境就绪后，两个

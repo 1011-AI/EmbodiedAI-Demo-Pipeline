@@ -20,6 +20,7 @@ from pipelines.custom.fastwam.behavior1k.adapter import (
     patch_episode_selection,
     patch_checkpoint_load_report,
     patch_explicit_lerobot_keys,
+    patch_sparse_video_decode,
     patch_v3_shard_loading,
     project_r1pro_state_array,
 )
@@ -98,6 +99,7 @@ def test_generated_fastwam_config_matches_real_upstream_interfaces() -> None:
     assert config["concat_multi_camera"] == "robotwin"
     assert config["num_frames"] == 33
     assert config["action_video_freq_ratio"] == 4
+    assert config["sparse_video_decode"] is True
     assert config["episode_indices"] == list(range(200))
     assert config["video_size"] == [384, 320]
     assert [item["lerobot_key"] for item in config["shape_meta"]["images"]] == list(
@@ -111,11 +113,27 @@ def test_generated_fastwam_config_matches_real_upstream_interfaces() -> None:
     }
     processor = config["processor"]
     assert processor["_target_"].endswith("FastWAMProcessor")
+    assert processor["num_obs_steps"] == 33
+    assert processor["num_image_steps"] == 9
     assert processor["num_output_cameras"] == 3
     assert processor["action_output_dim"] == 23
     assert processor["proprio_output_dim"] == 23
     assert processor["norm_default_mode"] == "z-score"
     assert processor["delta_action_dim_mask"] is None
+
+
+def test_fastwam_config_can_disable_sparse_decode_without_changing_horizons() -> None:
+    config = build_fastwam_data_config(
+        dataset_root="/dataset/task0-view",
+        norm_stats_path="/stats/task0.json",
+        text_embedding_cache_dir="/cache/text",
+        sparse_video_decode=False,
+    )
+
+    assert config["sparse_video_decode"] is False
+    assert config["processor"]["num_image_steps"] == 33
+    assert config["processor"]["num_obs_steps"] == 33
+    assert config["num_frames"] - 1 == 32
 
 
 def _write_fastwam_source_fixture(root: Path) -> None:
@@ -129,10 +147,39 @@ def _write_fastwam_source_fixture(root: Path) -> None:
                 "        dataset_dirs: List[str],",
                 "        shape_meta: Dict[str, Any],",
                 "        action_size: int = 1,",
+                "        past_action_size: int = 0,",
+                "        obs_size: int = 1,",
+                "        past_obs_size: int = 0,",
+                "",
+                "        # sampling",
+                "        global_sample_stride: int = 1,",
                 "    ):",
-                'meta["lerobot_key"] = f"observation.images.{key}" if key != "default" else "observation.images"',
-                'meta["lerobot_key"] = f"observation.state.{key}" if key != "default" else "observation.state"',
-                'meta["lerobot_key"] = f"action.{key}" if key != "default" else "action"',
+                "        assert action_size == obs_size - 1, \"In this dataset, action_size should be obs_size - 1\"",
+                "        ",
+                "        self.dataset_dirs = dataset_dirs",
+                '        self.image_meta = shape_meta["images"]',
+                '        self.state_meta = shape_meta["state"]',
+                '        self.action_meta = shape_meta["action"]',
+                "",
+                "        delta_timestamps = {}",
+                "        for meta in self.image_meta:",
+                '            key = meta["key"]',
+                '            meta["lerobot_key"] = f"observation.images.{key}" if key != "default" else "observation.images"',
+                '            delta_timestamps[meta["lerobot_key"]] = [',
+                "                (t * global_sample_stride) / fps for t in range(-past_obs_size, -past_obs_size + obs_size)",
+                "            ]",
+                "",
+                "        for meta in self.state_meta:",
+                '            key = meta["key"]',
+                '            meta["lerobot_key"] = f"observation.state.{key}" if key != "default" else "observation.state"',
+                '            delta_timestamps[meta["lerobot_key"]] = [',
+                "                (t * global_sample_stride) / fps for t in range(-past_obs_size, -past_obs_size + obs_size)",
+                "            ]",
+                "",
+                "        for meta in self.action_meta:",
+                '            key = meta["key"]',
+                '            meta["lerobot_key"] = f"action.{key}" if key != "default" else "action"',
+                '            delta_timestamps[meta["lerobot_key"]] = [(t * global_sample_stride) / fps for t in range(-past_action_size, -past_action_size + action_size)]',
                 "        episodes = None",
                 "        if val_set_proportion >= 1e-6:",
                 "            for meta in metas:",
@@ -159,14 +206,50 @@ def _write_fastwam_source_fixture(root: Path) -> None:
             "        self,\n"
             "        dataset_dirs,\n"
             "        shape_meta,\n"
+            "        num_frames=33,\n"
+            "        action_video_freq_ratio: int = 1,\n"
+            "        skip_padding_as_possible: bool = False,\n"
             "    ):\n"
             "        self.lerobot_dataset = BaseLerobotDataset(\n"
             "            dataset_dirs=dataset_dirs,\n"
             "            shape_meta=OmegaConf.to_container(shape_meta, resolve=True),\n"
             "            obs_size=num_frames,\n"
+            "            action_size=num_frames - 1,\n"
+            "            is_training_set=is_training_set,\n"
+            "            global_sample_stride=global_sample_stride,\n"
             "        )\n"
+            "    \n"
+            "        self.num_frames = num_frames\n"
+            "        self.action_video_freq_ratio = action_video_freq_ratio\n"
+            "        \n"
+            "        assert (num_frames - 1) % self.action_video_freq_ratio == 0\n"
+            "        self.video_sample_indices = list(range(0, num_frames, self.action_video_freq_ratio))\n"
             '        if self.concat_multi_camera == "robotwin":\n'
             '            raise ValueError("requires exactly 3 cameras")\n'
+        ),
+        "src/fastwam/datasets/lerobot/processors/fastwam_processor.py": (
+            "from typing import Any, Dict, List, Optional\n"
+            "class FastWAMProcessor:\n"
+            "    def __init__(\n"
+            "        self,\n"
+            "        shape_meta: Dict[str, Any],\n"
+            "        num_obs_steps: int,\n"
+            "        num_output_cameras: int,\n"
+            "        action_output_dim: int,\n"
+            "        proprio_output_dim: int,\n"
+            "        tokenizer: Optional[Any] = None,\n"
+            "        delta_action_dim_mask: Optional[Dict[str, List[bool]]] = None,\n"
+            "    ):\n"
+            "        self.shape_meta = shape_meta\n"
+            "        self.num_obs_steps = num_obs_steps\n"
+            "        self.num_output_cameras = num_output_cameras\n"
+            "\n"
+            "    def preprocess(self, data):\n"
+            "        for meta in self.shape_meta[\"images\"]:\n"
+            "            key, shape = meta[\"key\"], meta[\"shape\"]\n"
+            "            image = data[\"images\"][key]\n"
+            "            meta_shape = [self.num_obs_steps] + shape\n"
+            "            assert image.shape == meta_shape\n"
         ),
         "src/fastwam/datasets/lerobot/lerobot/lerobot_dataset.py": "\n".join(
             [
@@ -234,8 +317,20 @@ def _write_fastwam_source_fixture(root: Path) -> None:
                 '        # TODO(aliberts): hf_dataset.set_format("torch")',
                 "        return hf_dataset",
                 "",
-                "    def _get_query_timestamps(self, query_indices):",
-                '        query_timestamps[key] = torch.stack(timestamps).tolist()',
+                "    def _get_query_timestamps(",
+                "        self,",
+                "        current_ts: float,",
+                "        query_indices: dict[str, list[int]] | None = None,",
+                "    ) -> dict[str, list[float]]:",
+                "        query_timestamps = {}",
+                "        for key in self.meta.video_keys:",
+                "            if query_indices is not None and key in query_indices:",
+                '                timestamps = self.hf_dataset.select(query_indices[key])["timestamp"]',
+                "                query_timestamps[key] = torch.stack(timestamps).tolist()",
+                "            else:",
+                "                query_timestamps[key] = [current_ts]",
+                "",
+                "        return query_timestamps",
                 "",
                 "    def _query_hf_dataset(self, query_indices):",
                 '        return {key: torch.stack(self.hf_dataset.select(q_idx)[key])}',
@@ -397,11 +492,13 @@ def test_explicit_lerobot_key_patch_is_source_checked_and_idempotent(tmp_path: P
     episode_changed = patch_episode_selection(tmp_path)
     copy_v3_shard_compat_into_fastwam(tmp_path)
     v3_changed = patch_v3_shard_loading(tmp_path)
+    sparse_changed = patch_sparse_video_decode(tmp_path)
     copy_checkpoint_report_into_fastwam(tmp_path)
     report_changed = patch_checkpoint_load_report(tmp_path)
     changed_again = patch_explicit_lerobot_keys(tmp_path)
     episode_changed_again = patch_episode_selection(tmp_path)
     v3_changed_again = patch_v3_shard_loading(tmp_path)
+    sparse_changed_again = patch_sparse_video_decode(tmp_path)
     report_changed_again = patch_checkpoint_load_report(tmp_path)
     after = inspect_fastwam_source(tmp_path)
 
@@ -410,13 +507,16 @@ def test_explicit_lerobot_key_patch_is_source_checked_and_idempotent(tmp_path: P
     assert changed is True
     assert episode_changed is True
     assert v3_changed is True
+    assert sparse_changed is True
     assert report_changed is True
     assert changed_again is False
     assert episode_changed_again is False
     assert v3_changed_again is False
+    assert sparse_changed_again is False
     assert report_changed_again is False
     assert after.explicit_lerobot_key is True
     assert after.lerobot_v3_shards is True
+    assert after.sparse_video_decode is True
     assert after.direct_cuda_load is True
     assert after.low_memory_checkpoint is True
     assert after.ready_for_behavior1k_config is True
@@ -460,6 +560,29 @@ def test_explicit_lerobot_key_patch_is_source_checked_and_idempotent(tmp_path: P
     assert loader.count("_stack_hf_column(") == 5
     assert "disabled.  Do not" in loader
     assert "tolerance_s = max(tolerance_s, 1e-3)" in loader
+    assert "video_keys = [key for key in self.meta.video_keys if key in query_indices]" in loader
+    assert "if query_indices is not None and key in query_indices" not in loader
+
+    base_loader = (
+        tmp_path / "src/fastwam/datasets/lerobot/base_lerobot_dataset.py"
+    ).read_text(encoding="utf-8")
+    assert "image_sample_stride: int = 1" in base_loader
+    assert "                    image_sample_stride," in base_loader
+    assert base_loader.count("-past_obs_size + obs_size") == 2
+
+    robot_video = (
+        tmp_path / "src/fastwam/datasets/lerobot/robot_video_dataset.py"
+    ).read_text(encoding="utf-8")
+    assert "sparse_video_decode: bool = False" in robot_video
+    assert "action_video_freq_ratio if sparse_video_decode else 1" in robot_video
+    assert "range((num_frames - 1) // self.action_video_freq_ratio + 1)" in robot_video
+
+    processor_source = (
+        tmp_path
+        / "src/fastwam/datasets/lerobot/processors/fastwam_processor.py"
+    ).read_text(encoding="utf-8")
+    assert "num_image_steps: Optional[int] = None" in processor_source
+    assert "meta_shape = [self.num_image_steps] + shape" in processor_source
 
     # A partially patched generated tree must never be advertised as ready:
     # action construction would otherwise retain the high-host-memory path.
@@ -475,6 +598,31 @@ def test_explicit_lerobot_key_patch_is_source_checked_and_idempotent(tmp_path: P
     partial = inspect_fastwam_source(tmp_path)
     assert partial.direct_cuda_load is False
     assert partial.ready_for_behavior1k_config is False
+
+
+def test_sparse_video_patch_rejects_source_drift_without_partial_writes(
+    tmp_path: Path,
+) -> None:
+    _write_fastwam_source_fixture(tmp_path)
+    patch_explicit_lerobot_keys(tmp_path)
+    patch_episode_selection(tmp_path)
+    copy_v3_shard_compat_into_fastwam(tmp_path)
+    patch_v3_shard_loading(tmp_path)
+    video_path = tmp_path / "src/fastwam/datasets/lerobot/robot_video_dataset.py"
+    video_path.write_text(
+        video_path.read_text(encoding="utf-8").replace(
+            "        action_video_freq_ratio: int = 1,",
+            "        action_video_freq_ratio: int = 2,",
+            1,
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(FastWAMBehaviorContractError, match="source block"):
+        patch_sparse_video_decode(tmp_path)
+
+    base_path = tmp_path / "src/fastwam/datasets/lerobot/base_lerobot_dataset.py"
+    assert "image_sample_stride" not in base_path.read_text(encoding="utf-8")
 
 
 def test_direct_cuda_helper_falls_back_only_for_pytorch27_bfloat16_complex_error(

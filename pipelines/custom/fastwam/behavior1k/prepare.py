@@ -17,6 +17,7 @@ from pipelines.custom.fastwam.behavior1k.adapter import (
     patch_episode_selection,
     patch_checkpoint_load_report,
     patch_explicit_lerobot_keys,
+    patch_sparse_video_decode,
     patch_v3_shard_loading,
     project_r1pro_state_array,
 )
@@ -326,6 +327,7 @@ def install_task0_configs(
     task_instruction: str,
     norm_stats_path: str | Path,
     text_embedding_cache_dir: str | Path,
+    sparse_video_decode: bool = True,
 ) -> FastWAMBehaviorInstall:
     """Patch the generated workspace and install real Hydra data/task configs."""
 
@@ -334,6 +336,7 @@ def install_task0_configs(
     patch_episode_selection(source_root)
     v3_shard_path = copy_v3_shard_compat_into_fastwam(source_root)
     patch_v3_shard_loading(source_root)
+    patch_sparse_video_decode(source_root)
     transform_path = copy_transform_into_fastwam(source_root)
     report_path = copy_checkpoint_report_into_fastwam(source_root)
     patch_checkpoint_load_report(source_root)
@@ -345,6 +348,7 @@ def install_task0_configs(
         episode_indices=episode_indices,
         is_training_set=True,
         val_set_proportion=0.0,
+        sparse_video_decode=sparse_video_decode,
     )
     data_payload = {"train": train_config, "val": None}
     normalized_instruction = str(task_instruction).strip()

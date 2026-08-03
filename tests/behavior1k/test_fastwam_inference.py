@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -42,14 +43,26 @@ def _source_root(root: Path) -> Path:
             [
                 'meta["lerobot_key"] = meta.get("lerobot_key")',
                 "episode_indices: Optional[List[int]] = None",
+                "image_sample_stride: int = 1",
+                "                    image_sample_stride,",
             ]
         ),
         "src/fastwam/datasets/lerobot/robot_video_dataset.py": "\n".join(
             [
                 "episode_indices: Optional[List[int]] = None",
                 "episode_indices=episode_indices",
+                "sparse_video_decode: bool = False",
+                "image_sample_stride=(",
+                "    action_video_freq_ratio if sparse_video_decode else 1",
+                ")",
                 'if self.concat_multi_camera == "robotwin":',
                 '    raise ValueError("requires exactly 3 cameras")',
+            ]
+        ),
+        "src/fastwam/datasets/lerobot/processors/fastwam_processor.py": "\n".join(
+            [
+                "num_image_steps: Optional[int] = None",
+                "meta_shape = [self.num_image_steps] + shape",
             ]
         ),
         "src/fastwam/datasets/lerobot/lerobot/lerobot_dataset.py": "\n".join(
@@ -60,6 +73,8 @@ def _source_root(root: Path) -> Path:
                 "shift_v3_video_timestamps",
                 "v3_data_file_path",
                 "v3_video_file_path",
+                "video_keys = self.meta.video_keys",
+                "video_keys = [key for key in self.meta.video_keys if key in query_indices]",
             ]
         ),
         "src/fastwam/datasets/lerobot/lerobot/behavior1k_v3_shards.py": (
@@ -377,6 +392,116 @@ def test_protocol_arrays_become_writable_contiguous_processor_inputs() -> None:
     assert image.flags.writeable and image.flags.c_contiguous
     assert state.shape == (61,) and state.dtype == np.float32
     assert image.shape == (3, 4, 5) and image.dtype == np.uint8
+
+
+@pytest.mark.parametrize(
+    ("num_image_steps", "expected_image_steps"),
+    [(None, 33), (9, 9)],
+)
+def test_evaluator_preprocess_separates_state_and_image_horizons(
+    num_image_steps: int | None,
+    expected_image_steps: int,
+) -> None:
+    class Tensor:
+        def __init__(self, shape) -> None:
+            self.shape = tuple(int(value) for value in shape)
+
+        def unsqueeze(self, dim: int):
+            dim = dim if dim >= 0 else len(self.shape) + dim + 1
+            shape = list(self.shape)
+            shape.insert(dim, 1)
+            return Tensor(shape)
+
+        def repeat(self, *repeats: int):
+            assert len(repeats) == len(self.shape)
+            return Tensor(
+                size * multiplier
+                for size, multiplier in zip(self.shape, repeats)
+            )
+
+        def __getitem__(self, item):
+            assert isinstance(item, int)
+            return Tensor(self.shape[1:])
+
+        def permute(self, *dims: int):
+            return Tensor(self.shape[index] for index in dims)
+
+        def clone(self):
+            return Tensor(self.shape)
+
+    class Torch:
+        bool = "bool"
+
+        @staticmethod
+        def from_numpy(value):
+            return Tensor(value.shape)
+
+        @staticmethod
+        def zeros(*shape, **_kwargs):
+            return Tensor(shape)
+
+        @staticmethod
+        def cat(values, dim: int):
+            shape = list(values[0].shape)
+            dim = dim if dim >= 0 else len(shape) + dim
+            shape[dim] = sum(value.shape[dim] for value in values)
+            return Tensor(shape)
+
+    class Processor:
+        num_obs_steps = 33
+
+        def __init__(self) -> None:
+            if num_image_steps is not None:
+                self.num_image_steps = num_image_steps
+            self.received = None
+
+        def preprocess(self, batch):
+            self.received = batch
+            assert batch["state"]["default"].shape == (33, 61)
+            assert batch["state_is_pad"].shape == (33,)
+            assert batch["image_is_pad"].shape == (expected_image_steps,)
+            assert all(
+                image.shape[0] == expected_image_steps
+                for image in batch["images"].values()
+            )
+            return {
+                "pixel_values": Tensor((3, expected_image_steps, 3, 224, 224)),
+                "proprio": Tensor((33, 23)),
+            }
+
+    class TransformsF:
+        InterpolationMode = SimpleNamespace(BILINEAR="bilinear")
+
+        @staticmethod
+        def resize(value, *, size, **_kwargs):
+            return Tensor((*value.shape[:-2], *size))
+
+    identity = lambda value: value
+    policy = object.__new__(FastWAMBehaviorPolicy)
+    policy._np = np
+    policy._torch = Torch()
+    policy.processor = Processor()
+    policy._transforms_f = TransformsF()
+    policy.dataset = SimpleNamespace(
+        resize_transform=identity,
+        crop_transform=identity,
+        normalize_transform=identity,
+    )
+    policy._task_context = Tensor((128, 4096))
+    policy._task_context_mask = Tensor((128,))
+    policy.task_instruction = "Turn on the radio."
+    observation = {
+        "observation.state": np.zeros(61, dtype=np.float32),
+        **{
+            key: np.zeros((8, 10, 3), dtype=np.uint8)
+            for key in RGB_VIDEO_KEYS
+        },
+    }
+
+    sample = policy._preprocess_evaluator_observation(observation)
+
+    assert sample["video"].shape == (3, expected_image_steps, 384, 320)
+    assert sample["proprio"].shape == (33, 23)
 
 
 def test_denormalization_preserves_full_23d_chunk_shape() -> None:

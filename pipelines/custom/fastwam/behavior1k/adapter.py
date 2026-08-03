@@ -173,6 +173,7 @@ def build_fastwam_data_config(
     val_set_proportion: float = 0.0,
     num_frames: int = 33,
     action_video_freq_ratio: int = 4,
+    sparse_video_decode: bool = True,
     video_size: tuple[int, int] = (384, 320),
     image_size: tuple[int, int] = (224, 224),
 ) -> dict[str, Any]:
@@ -251,6 +252,7 @@ def build_fastwam_data_config(
         ),
         "shape_meta": "${data.train.shape_meta}",
         "num_obs_steps": num_frames,
+        "num_image_steps": video_transitions + 1 if sparse_video_decode else num_frames,
         "num_output_cameras": 3,
         "action_output_dim": ACTION_DIM,
         "proprio_output_dim": POLICY_STATE_DIM,
@@ -302,6 +304,7 @@ def build_fastwam_data_config(
         "num_frames": num_frames,
         "global_sample_stride": 1,
         "action_video_freq_ratio": action_video_freq_ratio,
+        "sparse_video_decode": bool(sparse_video_decode),
         "video_size": [int(video_size[0]), int(video_size[1])],
         "camera_key": None,
         "val_set_proportion": float(val_set_proportion),
@@ -330,6 +333,7 @@ class FastWAMSourceCapabilities:
     source_root: str
     explicit_lerobot_key: bool
     episode_selection: bool
+    sparse_video_decode: bool
     lerobot_v3_shards: bool
     robotwin_three_camera: bool
     shape_compatible_checkpoint: bool
@@ -349,6 +353,10 @@ def inspect_fastwam_source(source_root: str | Path) -> FastWAMSourceCapabilities
     root = Path(source_root).expanduser().resolve()
     base_path = root / "src/fastwam/datasets/lerobot/base_lerobot_dataset.py"
     video_path = root / "src/fastwam/datasets/lerobot/robot_video_dataset.py"
+    processor_path = (
+        root
+        / "src/fastwam/datasets/lerobot/processors/fastwam_processor.py"
+    )
     loader_path = (
         root
         / "src/fastwam/datasets/lerobot/lerobot/lerobot_dataset.py"
@@ -369,6 +377,7 @@ def inspect_fastwam_source(source_root: str | Path) -> FastWAMSourceCapabilities
     required = (
         base_path,
         video_path,
+        processor_path,
         loader_path,
         component_loader_path,
         action_model_path,
@@ -383,6 +392,7 @@ def inspect_fastwam_source(source_root: str | Path) -> FastWAMSourceCapabilities
 
     base_text = base_path.read_text(encoding="utf-8")
     video_text = video_path.read_text(encoding="utf-8")
+    processor_text = processor_path.read_text(encoding="utf-8")
     loader_text = loader_path.read_text(encoding="utf-8")
     component_loader_text = component_loader_path.read_text(encoding="utf-8")
     action_model_text = action_model_path.read_text(encoding="utf-8")
@@ -393,6 +403,18 @@ def inspect_fastwam_source(source_root: str | Path) -> FastWAMSourceCapabilities
         "episode_indices: Optional[List[int]] = None" in base_text
         and "episode_indices: Optional[List[int]] = None" in video_text
         and "episode_indices=episode_indices" in video_text
+    )
+    sparse_video_decode = (
+        "image_sample_stride: int = 1" in base_text
+        and "                    image_sample_stride," in base_text
+        and "sparse_video_decode: bool = False" in video_text
+        and "image_sample_stride=(" in video_text
+        and "if sparse_video_decode else 1" in video_text
+        and "video_keys = self.meta.video_keys" in loader_text
+        and "video_keys = [key for key in self.meta.video_keys if key in query_indices]"
+        in loader_text
+        and "num_image_steps: Optional[int] = None" in processor_text
+        and "[self.num_image_steps] + shape" in processor_text
     )
     v3_shards = (
         v3_compat_path.is_file()
@@ -440,6 +462,7 @@ def inspect_fastwam_source(source_root: str | Path) -> FastWAMSourceCapabilities
         source_root=str(root),
         explicit_lerobot_key=explicit,
         episode_selection=episode_selection,
+        sparse_video_decode=sparse_video_decode,
         lerobot_v3_shards=v3_shards,
         robotwin_three_camera=robotwin,
         shape_compatible_checkpoint=shape_compatible,
@@ -450,6 +473,7 @@ def inspect_fastwam_source(source_root: str | Path) -> FastWAMSourceCapabilities
         ready_for_behavior1k_config=(
             explicit
             and episode_selection
+            and sparse_video_decode
             and v3_shards
             and robotwin
             and shape_compatible
@@ -614,6 +638,216 @@ def patch_episode_selection(source_root: str | Path) -> bool:
         base_path.write_text(base, encoding="utf-8")
         video_path.write_text(video, encoding="utf-8")
     return changed
+
+
+def patch_sparse_video_decode(source_root: str | Path) -> bool:
+    """Decode only configured video keys and the temporal frames FastWAM uses.
+
+    The pinned loader otherwise decodes every RGB/depth stream advertised by
+    dataset metadata and materializes all 33 image steps before
+    ``RobotVideoDataset`` keeps steps ``0, 4, ..., 32``.  This source-checked
+    overlay changes image timestamps only: state remains 33 steps and action
+    remains 32 steps.  The switch defaults off in upstream-compatible source;
+    :func:`build_fastwam_data_config` enables it for BEHAVIOR-1K.
+    """
+
+    root = Path(source_root).expanduser().resolve()
+    base_path = root / "src/fastwam/datasets/lerobot/base_lerobot_dataset.py"
+    video_path = root / "src/fastwam/datasets/lerobot/robot_video_dataset.py"
+    loader_path = (
+        root / "src/fastwam/datasets/lerobot/lerobot/lerobot_dataset.py"
+    )
+    processor_path = (
+        root / "src/fastwam/datasets/lerobot/processors/fastwam_processor.py"
+    )
+    required = (base_path, video_path, loader_path, processor_path)
+    missing = [str(path) for path in required if not path.is_file()]
+    if missing:
+        raise FastWAMBehaviorContractError(
+            f"FastWAM sparse-video sources are incomplete; missing: {missing}"
+        )
+
+    sources = {
+        base_path: base_path.read_text(encoding="utf-8"),
+        video_path: video_path.read_text(encoding="utf-8"),
+        loader_path: loader_path.read_text(encoding="utf-8"),
+        processor_path: processor_path.read_text(encoding="utf-8"),
+    }
+    changed_paths: set[Path] = set()
+
+    def replace_once(path: Path, before: str, after: str, description: str) -> None:
+        source = sources[path]
+        if after in source:
+            return
+        count = source.count(before)
+        if count != 1:
+            raise FastWAMBehaviorContractError(
+                f"cannot safely patch {description} in {path}: "
+                f"expected one source block, found {count}"
+            )
+        sources[path] = source.replace(before, after, 1)
+        changed_paths.add(path)
+
+    replace_once(
+        base_path,
+        """        # sampling
+        global_sample_stride: int = 1,
+    ):""",
+        """        # sampling
+        global_sample_stride: int = 1,
+        image_sample_stride: int = 1,
+    ):""",
+        "BaseLerobotDataset image stride signature",
+    )
+    replace_once(
+        base_path,
+        (
+            '        assert action_size == obs_size - 1, "In this dataset, action_size should be obs_size - 1"\n'
+            "        \n"
+            "        self.dataset_dirs = dataset_dirs"
+        ),
+        """        assert action_size == obs_size - 1, "In this dataset, action_size should be obs_size - 1"
+        if image_sample_stride <= 0:
+            raise ValueError(f"`image_sample_stride` must be positive, got {image_sample_stride}.")
+
+        self.dataset_dirs = dataset_dirs""",
+        "BaseLerobotDataset image stride validation",
+    )
+    replace_once(
+        base_path,
+        """        for meta in self.image_meta:
+            key = meta["key"]
+            meta["lerobot_key"] = meta.get("lerobot_key") or (f"observation.images.{key}" if key != "default" else "observation.images")
+            delta_timestamps[meta["lerobot_key"]] = [
+                (t * global_sample_stride) / fps for t in range(-past_obs_size, -past_obs_size + obs_size)
+            ]
+""",
+        """        for meta in self.image_meta:
+            key = meta["key"]
+            meta["lerobot_key"] = meta.get("lerobot_key") or (f"observation.images.{key}" if key != "default" else "observation.images")
+            delta_timestamps[meta["lerobot_key"]] = [
+                (t * global_sample_stride) / fps
+                for t in range(
+                    -past_obs_size,
+                    -past_obs_size + obs_size,
+                    image_sample_stride,
+                )
+            ]
+""",
+        "BaseLerobotDataset sparse image timestamps",
+    )
+
+    replace_once(
+        video_path,
+        """        action_video_freq_ratio: int = 1,
+        skip_padding_as_possible: bool = False,""",
+        """        action_video_freq_ratio: int = 1,
+        sparse_video_decode: bool = False,
+        skip_padding_as_possible: bool = False,""",
+        "RobotVideoDataset sparse-video switch",
+    )
+    replace_once(
+        video_path,
+        """            is_training_set=is_training_set,
+            global_sample_stride=global_sample_stride,
+        )""",
+        """            is_training_set=is_training_set,
+            global_sample_stride=global_sample_stride,
+            image_sample_stride=(
+                action_video_freq_ratio if sparse_video_decode else 1
+            ),
+        )""",
+        "RobotVideoDataset image stride forwarding",
+    )
+    replace_once(
+        video_path,
+        """        self.num_frames = num_frames
+        self.action_video_freq_ratio = action_video_freq_ratio
+        """,
+        """        self.num_frames = num_frames
+        self.action_video_freq_ratio = action_video_freq_ratio
+        self.sparse_video_decode = sparse_video_decode
+        """,
+        "RobotVideoDataset sparse-video state",
+    )
+    replace_once(
+        video_path,
+        """        self.video_sample_indices = list(range(0, num_frames, self.action_video_freq_ratio))""",
+        """        if self.sparse_video_decode:
+            # BaseLerobotDataset has already queried exactly these image steps.
+            self.video_sample_indices = list(
+                range((num_frames - 1) // self.action_video_freq_ratio + 1)
+            )
+        else:
+            self.video_sample_indices = list(
+                range(0, num_frames, self.action_video_freq_ratio)
+            )""",
+        "RobotVideoDataset post-decode sampling",
+    )
+
+    replace_once(
+        loader_path,
+        """        query_timestamps = {}
+        for key in self.meta.video_keys:
+            if query_indices is not None and key in query_indices:
+                timestamps = self.hf_dataset.select(query_indices[key])["timestamp"]
+                query_timestamps[key] = _stack_hf_column(timestamps).tolist()
+            else:
+                query_timestamps[key] = [current_ts]
+
+        return query_timestamps""",
+        """        query_timestamps = {}
+        video_keys = self.meta.video_keys
+        if query_indices is not None:
+            # Query only configured video features.  BEHAVIOR metadata also
+            # advertises depth streams, but RGB-only training must not decode
+            # an unconfigured depth frame at every sample.
+            video_keys = [key for key in self.meta.video_keys if key in query_indices]
+        for key in video_keys:
+            if query_indices is not None:
+                timestamps = self.hf_dataset.select(query_indices[key])["timestamp"]
+                query_timestamps[key] = _stack_hf_column(timestamps).tolist()
+            else:
+                query_timestamps[key] = [current_ts]
+
+        return query_timestamps""",
+        "LeRobot configured video-key timestamp query",
+    )
+
+    replace_once(
+        processor_path,
+        """        tokenizer: Optional[Any] = None,
+        delta_action_dim_mask: Optional[Dict[str, List[bool]]] = None,
+    ):""",
+        """        tokenizer: Optional[Any] = None,
+        delta_action_dim_mask: Optional[Dict[str, List[bool]]] = None,
+        num_image_steps: Optional[int] = None,
+    ):""",
+        "FastWAMProcessor image-step signature",
+    )
+    replace_once(
+        processor_path,
+        """        self.shape_meta = shape_meta
+        self.num_obs_steps = num_obs_steps
+        self.num_output_cameras = num_output_cameras""",
+        """        self.shape_meta = shape_meta
+        self.num_obs_steps = num_obs_steps
+        self.num_image_steps = num_obs_steps if num_image_steps is None else num_image_steps
+        if self.num_image_steps <= 0:
+            raise ValueError(f"`num_image_steps` must be positive, got {self.num_image_steps}.")
+        self.num_output_cameras = num_output_cameras""",
+        "FastWAMProcessor image-step state",
+    )
+    replace_once(
+        processor_path,
+        """            meta_shape = [self.num_obs_steps] + shape""",
+        """            meta_shape = [self.num_image_steps] + shape""",
+        "FastWAMProcessor image shape contract",
+    )
+
+    for path in changed_paths:
+        path.write_text(sources[path], encoding="utf-8")
+    return bool(changed_paths)
 
 
 def copy_v3_shard_compat_into_fastwam(source_root: str | Path) -> Path:

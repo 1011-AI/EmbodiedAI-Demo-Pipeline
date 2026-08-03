@@ -65,6 +65,11 @@ behavior1k:
   # 配置调用上游真实 precompute_text_embeds.py，不在线伪造 embedding。
   text_embedding_cache_dir: data/custom/fastwam/behavior1k/text_embeds/task0000
 
+  # true 时只解码模型实际使用的 0,4,...,32 九个 RGB 时刻，并跳过未配置的
+  # depth 流；state/action 仍保持 33/32 步，模型输入与旧路径相同。
+  # 如需复现实验旧路径可设 false，吞吐会明显下降。
+  sparse_video_decode: true
+
 distributed:
   # auto 优先读取 FASTWAM_GPUS_PER_NODE / NPROC_PER_NODE，其次读取当前可见 CUDA。
   # 同一份配置可直接适配单卡、4 卡和 8 卡节点。
@@ -121,6 +126,9 @@ fastwam:
     - train_action_expert_only=true
     - model.loss.lambda_video=0.0
     - model.loss.lambda_action=1.0
+    # 8×A800 action-only 实测：关闭后平均显存仍约 33.3 GiB/GPU，稳态吞吐提高约 16%。
+    # video expert 已冻结，保留 checkpointing 只会引入不必要的重复计算。
+    - model.mot_checkpoint_mixed_attn=false
     - learning_rate=2e-5
     - keep_last_n_checkpoints=3
 
@@ -133,17 +141,18 @@ mode:
     save_every: 1
 
   pilot:
-    # 8×A800、64 CPU 核、>=100 GiB 主机内存的已验证短训配置。
-    # B8/W6 受三路 HEVC 解码限制，实测慢于 B4/W6，不要盲目增大 batch。
+    # 8×A800 80GB、64 CPU 核、>=120 GiB 主机内存的已验证短训配置。
+    # 每卡 B8、全局 batch 64；默认 sparse decode + 关闭 gradient checkpointing。
     max_steps: 20
-    batch_size: 4
+    batch_size: 8
     num_workers: 6
     save_every: 20
 
   full:
-    # 同一台 8×A800/64 核机器的稳健长训起点。W6 为 trainer、checkpoint
-    # 和系统进程保留 CPU 余量；峰值 probe 可临时试 W7，但不建议长期占满 64 核。
-    batch_size: 4
+    # 同一台 8×A800/64 核机器的稳健长训起点。B12 稳态收益不足 1%（约 0.3%），
+    # 却把平均显存从约 33.3 GiB 增至约 40.1 GiB，因此长期实验保留 B8/W6。
+    # batch 改变会影响每 epoch update 数；若调整它，需要同步审视 LR/schedule。
+    batch_size: 8
     num_workers: 6
     num_epochs: 5
     save_every: 500

@@ -302,7 +302,7 @@ python experiments/custom/fastwam_behavior1k_task0/run.py --dataset-smoke
 正确 shape 为：
 
 ```text
-pixel_values: (3, 33, 3, 224, 224)
+pixel_values: (3, 9, 3, 224, 224)
 action:       (32, 23)
 proprio:      (33, 23)
 ```
@@ -408,6 +408,11 @@ FastWAM 已预置三档：
 | `pilot` | 20 step，第一次观察 loss 与吞吐 |
 | `full` | 5 epoch 保守起点，必须基于 pilot 调参 |
 
+当前 8×A800 已验证的 `pilot/full` 起点是每卡 B8、每 rank W6、sparse RGB
+decode、action-only 路线关闭 gradient checkpointing。160-step 长测累计
+`54.63 samples/s`，loss `2.3770→0.2836`。B12 的稳态收益不足 1%，因此没有
+作为默认配置。该结论只选择工程吞吐配置，不等价于学习率或收敛超参已经最优。
+
 复制配置后把：
 
 ```yaml
@@ -442,15 +447,15 @@ fastwam:
 6. 新进程重新加载 base + checkpoint；
 7. 对真实样本输出 finite 23D action。
 
-不能根据 π0.5 的 2 step 或 FastWAM 的 1 step 宣称：
+不能根据任一路线的 one-step smoke 宣称：
 
 - loss 正常下降；
 - 模型收敛；
 - 任务成功；
 - 获得 Challenge 成功率。
 
-下一项正确验收是固定小样本的 20–100 step overfit/pilot，之后才接
-BEHAVIOR-1K v3.9.1 simulator evaluator。
+FastWAM 已额外完成 160-step pilot 并观察到 loss 明确下降；它仍不证明收敛或任务成功。
+下一项正确验收是固定小样本 overfit 或 BEHAVIOR-1K v3.9.1 simulator evaluator。
 
 ## 常见错误
 
