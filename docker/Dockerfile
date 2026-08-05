@@ -41,10 +41,18 @@ RUN rm -f /etc/apt/sources.list.d/cuda*.list \
       build-essential \
       ca-certificates \
       curl \
+      ethtool \
       git \
       git-lfs \
+      ibverbs-providers \
+      ibverbs-utils \
+      infiniband-diags \
+      iproute2 \
+      iputils-ping \
       make \
       openssh-server \
+      perftest \
+      rdma-core \
       rsync \
       unzip \
       vim \
