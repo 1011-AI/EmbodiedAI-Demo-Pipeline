@@ -80,6 +80,16 @@ def _source_root(root: Path) -> Path:
         "src/fastwam/datasets/lerobot/lerobot/behavior1k_v3_shards.py": (
             "# test v3 shared-shard helper\n"
         ),
+        "src/fastwam/datasets/lerobot/utils/normalizer.py": "\n".join(
+            [
+                "class SingleFieldLinearNormalizer:",
+                "    def __init__(self):",
+                "        self.constant_mask = None",
+                "    def inverse(self, x):",
+                '        if self.mode == "min/max":',
+                "            return torch.where(self.constant_mask, self.constant_value, x)",
+            ]
+        ),
         "src/fastwam/models/wan22/helpers/loader.py": "\n".join(
             [
                 'FASTWAM_DIRECT_CUDA_LOAD_ENV = "FASTWAM_DIRECT_CUDA_LOAD"',
@@ -532,6 +542,9 @@ def test_denormalization_preserves_full_23d_chunk_shape() -> None:
         def unsqueeze(self, dim: int):
             return Tensor(np.expand_dims(self.values, axis=dim))
 
+        def clamp(self, *, min: float, max: float):
+            return Tensor(np.clip(self.values, min, max))
+
         def __getitem__(self, item):
             return Tensor(self.values[item])
 
@@ -561,6 +574,7 @@ def test_denormalization_preserves_full_23d_chunk_shape() -> None:
     policy = object.__new__(FastWAMBehaviorPolicy)
     policy._torch = Torch()
     policy.processor = Processor()
+    policy.normalized_action_clip = 5.0
     actions = policy._denormalize_actions(
         Tensor(np.zeros((32, 23), dtype=np.float32)),
         Tensor(np.zeros((32, 23), dtype=np.float32)),
@@ -570,6 +584,75 @@ def test_denormalization_preserves_full_23d_chunk_shape() -> None:
     assert actions.dtype == np.float32
     assert actions.flags.c_contiguous
     np.testing.assert_array_equal(actions, np.full((32, 23), 2.0, dtype=np.float32))
+
+
+def test_denormalization_clips_to_training_normalized_support() -> None:
+    class Tensor:
+        def __init__(self, values) -> None:
+            self.values = np.asarray(values, dtype=np.float32)
+
+        @property
+        def ndim(self) -> int:
+            return self.values.ndim
+
+        @property
+        def shape(self):
+            return self.values.shape
+
+        def detach(self):
+            return self
+
+        def cpu(self):
+            return self
+
+        def numpy(self):
+            return self.values
+
+        def to(self, **_kwargs):
+            return self
+
+        def unsqueeze(self, dim: int):
+            return Tensor(np.expand_dims(self.values, axis=dim))
+
+        def clamp(self, *, min: float, max: float):
+            return Tensor(np.clip(self.values, min, max))
+
+        def __getitem__(self, item):
+            return Tensor(self.values[item])
+
+    class Torch:
+        float32 = np.float32
+
+    class Merger:
+        def backward(self, batch):
+            batch["action"] = {"default": batch["action"]}
+            batch["state"] = {"default": batch["state"]}
+            return batch
+
+    class Normalizer:
+        def backward(self, batch):
+            return batch
+
+    class Processor:
+        action_state_merger = Merger()
+        normalizer = Normalizer()
+        action_state_transforms = None
+
+    policy = object.__new__(FastWAMBehaviorPolicy)
+    policy._torch = Torch()
+    policy.processor = Processor()
+    policy.normalized_action_clip = 5.0
+    raw = np.zeros((32, 23), dtype=np.float32)
+    raw[0, 0] = -100.0
+    raw[0, 1] = 100.0
+
+    actions = policy._denormalize_actions(
+        Tensor(raw),
+        Tensor(np.zeros((32, 23), dtype=np.float32)),
+    )
+
+    assert actions[0, 0] == -5.0
+    assert actions[0, 1] == 5.0
 
 
 def test_fastwam_product_path_calls_real_upstream_model_processor_and_server() -> None:
@@ -638,6 +721,7 @@ def test_fastwam_inference_yaml_dry_run_checks_real_artifact_layout(
                 "  direct_cuda_load: true",
                 "  action_horizon: 32",
                 "  num_inference_steps: 20",
+                "  normalized_action_clip: 5.0",
                 "  seed: 42",
                 "server:",
                 "  host: 0.0.0.0",
@@ -682,6 +766,7 @@ def test_fastwam_inference_yaml_dry_run_checks_real_artifact_layout(
     assert "BEHAVIOR1K_FASTWAM_INFERENCE_DRY_RUN_OK" in result.stdout
     assert '"action_horizon": 32' in result.stdout
     assert '"direct_cuda_load": true' in result.stdout
+    assert '"normalized_action_clip": 5.0' in result.stdout
     assert '"execution_horizon": 16' in result.stdout
     expected_model_base = ROOT / "models"
     assert f'"diffsynth_model_base_path": "{expected_model_base}"' in result.stdout
@@ -702,6 +787,7 @@ def test_inference_yaml_documents_chunk_and_reset_contract() -> None:
 
     assert "action_horizon: 32" in text
     assert "direct_cuda_load: true" in text
+    assert "normalized_action_clip: 5.0" in text
     assert "execution_horizon: 16" in text
     assert "task_index: 0" in text
     assert (

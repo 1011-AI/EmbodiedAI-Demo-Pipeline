@@ -60,10 +60,9 @@ raise SystemExit(0 if torch.cuda.is_available() else 1)
 PY
 ```
 
-不要为了使用 `.venv_fastwam` 而盲目执行
-`source .venv_fastwam/bin/activate`。当前支持“平台系统 Python/Torch + 项目依赖
-overlay”的部署方式：训练入口会把 `.venv_fastwam` 中的非 Torch 依赖自动加入
-`PYTHONPATH`。如果该目录本身没有 Torch，它不是独立的训练环境。
+当前开发机与百舸训练镜像统一使用镜像默认 `python`，不创建、激活或切换虚拟环境。
+先确认这个解释器中的 Torch/CUDA，再用同一个解释器执行准备、训练和推理。镜像构建阶段
+安装非 Torch 依赖时不要让 pip 重新解析并覆盖平台 Torch。
 
 ### 2. 指向 GPU 可见的 Task 0 数据
 
@@ -276,16 +275,18 @@ bash scripts/fastwam/prepare_fastwam_overlay.sh
 这一步需要看到完整数据；文本预计算还需要较大的 CPU 内存：
 
 ```bash
-export BEHAVIOR1K_DATA_ROOT=/path/to/2026-challenge-demos
-
-python experiments/custom/fastwam_behavior1k_task0/run.py --prepare-only
-python experiments/custom/fastwam_behavior1k_task0/run.py --precompute-text-embeds
+python experiments/custom/fastwam_behavior1k_task0/run.py \
+  --dataset-root /path/to/2026-challenge-demos \
+  --prepare-only
+python experiments/custom/fastwam_behavior1k_task0/run.py \
+  --dataset-root /path/to/2026-challenge-demos \
+  --precompute-text-embeds
 ```
 
 它们生成：
 
 ```text
-data/custom/fastwam/behavior1k/task0000_norm_stats.json
+data/custom/fastwam/behavior1k/task0000_train198_seed42_norm_stats.json
 data/custom/fastwam/behavior1k/text_embeds/task0000/*.pt
 ```
 
@@ -294,9 +295,9 @@ data/custom/fastwam/behavior1k/text_embeds/task0000/*.pt
 ### 3. GPU 节点做真实 dataset smoke
 
 ```bash
-export BEHAVIOR1K_DATA_ROOT="$PWD/data/behavior1k/materialized/turning_on_radio"
-
-python experiments/custom/fastwam_behavior1k_task0/run.py --dataset-smoke
+python experiments/custom/fastwam_behavior1k_task0/run.py \
+  --dataset-root "$PWD/data/behavior1k/materialized/turning_on_radio" \
+  --dataset-smoke
 ```
 
 正确 shape 为：
@@ -311,7 +312,8 @@ proprio:      (33, 23)
 
 ```bash
 FASTWAM_GPUS_PER_NODE=1 \
-python experiments/custom/fastwam_behavior1k_task0/run.py --dry-run
+python experiments/custom/fastwam_behavior1k_task0/run.py \
+  --profile smoke --run-id task0-smoke-001 --dry-run
 ```
 
 FastWAM 的 `--dry-run` 会在 ignored 的 `upstreams/FastWAM-realrobot/` 中更新/核对项目
@@ -328,7 +330,8 @@ python experiments/custom/fastwam_behavior1k_task0/run.py \
 
 ```bash
 FASTWAM_GPUS_PER_NODE=1 \
-python experiments/custom/fastwam_behavior1k_task0/run.py
+python experiments/custom/fastwam_behavior1k_task0/run.py \
+  --profile smoke --run-id task0-smoke-001
 ```
 
 默认 `fastwam.mode: smoke`，执行一个真实 CUDA update：
@@ -338,6 +341,11 @@ python experiments/custom/fastwam_behavior1k_task0/run.py
 - 使用三路 RGB、`lambda_video=0`、`lambda_action=1`；
 - 只训练 action expert/proprio；
 - 保存 action/proprio delta。
+
+正式 `full` 使用固定 `max_steps=20000`，不是遍历 2.1 亿 frame 的全量 epoch。训练窗口由
+只保存 O(episode 数) 边界、frame-index 状态为 O(1) 的 deterministic episode-uniform
+sampler 按 262,144 samples/virtual-epoch
+生成；尾部 padding 窗口不进入采样，采样 counter 与增强 seed 均可随 full state 恢复。
 
 外层项目记录：
 
@@ -352,16 +360,21 @@ runs/experiments/custom/fastwam_behavior1k_task0/<run_id>/
 └── fastwam_native_output_dir.txt
 ```
 
-上游 native 产物：
+正式 checkpoint 产物（与 upstream 源码树分离）：
 
 ```text
-upstreams/FastWAM-realrobot/runs/behavior1k_task0_action_only/<run_id>/
+checkpoints/custom/fastwam/behavior1k_task0_action_only/<run_id>/
 ├── config.yaml
 ├── dataset_stats.json
-└── checkpoints/weights/step_*.pt
+├── checkpoint_index.json
+├── latest_checkpoint.json
+└── checkpoints/
+    ├── weights/step_*.pt
+    └── state/step_*/
 ```
 
-`fastwam_native_output_dir.txt` 保存两者之间的准确映射。
+任务级 `checkpoints/custom/fastwam/behavior1k_task0_action_only/latest_run.json` 保存最近一次
+有 checkpoint 的 run 指针；`fastwam_native_output_dir.txt` 保存外层日志与正式产物之间的准确映射。
 
 ### 6. 用训练结果做离线推理
 
@@ -406,34 +419,32 @@ FastWAM 已预置三档：
 |---|---|
 | `smoke` | 1 step，证明链路 |
 | `pilot` | 20 step，第一次观察 loss 与吞吐 |
-| `full` | 5 epoch 保守起点，必须基于 pilot 调参 |
+| `full` | 固定 20,000 optimizer steps，必须基于 pilot 调参 |
 
 当前 8×A800 已验证的 `pilot/full` 起点是每卡 B8、每 rank W6、sparse RGB
 decode、action-only 路线关闭 gradient checkpointing。160-step 长测累计
 `54.63 samples/s`，loss `2.3770→0.2836`。B12 的稳态收益不足 1%，因此没有
 作为默认配置。该结论只选择工程吞吐配置，不等价于学习率或收敛超参已经最优。
 
-复制配置后把：
-
-```yaml
-fastwam:
-  mode: pilot
-```
-
-再使用 `--config` 启动。当前每次训练都从 release/base 开始，不要把上一次低内存 delta
-作为 `resume`。
+不复制配置，直接使用 `--profile pilot`；正式任务同时给唯一 `--run-id`。当前每次训练都
+从 release/base 开始，不要把上一次低内存 delta 作为 `resume`。
 
 ## checkpoint 限制
 
-当前两条路线都启用了适合受限容器的低内存 checkpoint：
+当前两条路线默认启用适合受限容器的低内存 checkpoint：
 
 | 路线 | 可做 | 当前不可做 |
 |---|---|---|
 | π0.5 delta | base + delta 离线推理、policy server | 仅靠 delta 精确恢复 optimizer/RNG 后续训 |
 | FastWAM delta | release base + delta 离线推理、policy server | 把 delta 单独作为 trainer resume |
 
-正式长训需要完整或分片的 optimizer/model state，或者实现明确的 base→delta 双预载续训。
-在这之前，“后训练可运行”和“长期可恢复训练”是两个不同的验收项。
+FastWAM 正式长训可从第一次启动时使用 `--checkpoint-mode full` 保存 Accelerator 的完整
+model/optimizer/scheduler/RNG 和 dataloader 进度，之后用 `--resume-state` 指向
+`checkpoints/state/step_xxxxxx`，或用 `--resume-latest [--resume-run-id ID]` 自动选择最近的
+full state。`--keep-last N` 控制每个 run 的保留数量；delta-only 状态不会被自动续训选择。
+该接口已完成配置级验证；在依赖抢占恢复前，仍需用真实 GPU
+短任务验证一次保存空间、保存耗时和实际恢复。“后训练可运行”和“长期可恢复训练”仍是两个
+不同验收项。
 
 ## 如何判断一次后训练成功
 
@@ -464,7 +475,7 @@ FastWAM 已额外完成 160-step pilot 并观察到 loss 明确下降；它仍�
 | π0.5 一启动就占用全部 GPU | 默认是 `a800_8gpu` profile；单卡首次运行使用 `--profile smoke` 并限制 `CUDA_VISIBLE_DEVICES=0` |
 | π0.5 推理得到的还是 base 结果 | 忘记传训练后的 `--checkpoint .../pretrained_model` |
 | GPU 看不到完整数据路径 | 使用项目内 `data/behavior1k/materialized/turning_on_radio` 并设置 `BEHAVIOR1K_DATA_ROOT` |
-| FastWAM 找不到 Torch | 误激活了只含依赖的 `.venv_fastwam`；回到平台带 CUDA/Torch 的 Python |
+| FastWAM 找不到 Torch | 镜像默认 Python 未包含训练依赖；在镜像构建阶段安装依赖并保留平台 Torch，不要临时切换解释器 |
 | FastWAM 找不到文本缓存 | 在高内存管理节点执行一次 `--precompute-text-embeds` |
 | FastWAM delta 单独加载后结果异常 | 必须先加载 release/base，再覆盖 delta |
-| 训练命令想改很多参数 | 复制 YAML，通过 `--config` 选择；不要绕过入口手写 Hydra/Accelerate 长命令 |
+| 只想切 smoke/pilot/full | 用 `--profile`；只有模型或优化器结构变化时才新增实验 YAML |

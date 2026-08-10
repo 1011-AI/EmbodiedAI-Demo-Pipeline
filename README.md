@@ -49,13 +49,12 @@ LeRobotDataset v3
 ### 1. 安装轻量核心
 
 ```bash
-python -m venv .venv
-source .venv/bin/activate
 python -m pip install -e '.[dev,behavior1k]'
-pytest
+python -m pytest
 ```
 
-GPU 训练环境必须使用目标节点兼容的系统 Torch/CUDA，再安装对应路线的依赖；不要让通用安装脚本覆盖平台预装 Torch。
+当前开发机和训练镜像都使用默认 Python，不创建或激活虚拟环境。GPU 训练环境沿用
+镜像中与目标节点兼容的 Torch/CUDA；安装其余依赖时不要重新解析或覆盖平台 Torch。
 
 ### 2. 指定数据
 
@@ -113,17 +112,22 @@ python experiments/lerobot/pi05_behavior1k_task0/run.py \
 python experiments/lerobot/pi05_behavior1k_task0/run.py \
   --num-processes 1
 
-# custom FastWAM：先在大内存管理节点生成 stats 和文本缓存。
-export BEHAVIOR1K_DATA_ROOT=/path/to/2026-challenge-demos
-python experiments/custom/fastwam_behavior1k_task0/run.py --prepare-only
-python experiments/custom/fastwam_behavior1k_task0/run.py --precompute-text-embeds
+# custom FastWAM：先在默认 Python 中生成 stats；文本缓存已随镜像准备。
+python experiments/custom/fastwam_behavior1k_task0/run.py \
+  --dataset-root /path/to/2026-challenge-demos \
+  --prepare-only
+python experiments/custom/fastwam_behavior1k_task0/run.py \
+  --dataset-root /path/to/2026-challenge-demos \
+  --precompute-text-embeds
 
 # GPU 节点只读已准备的数据和缓存；先做真实 loader smoke，再训练。
 python experiments/custom/fastwam_behavior1k_task0/run.py --dataset-smoke
 FASTWAM_GPUS_PER_NODE=1 \
-  python experiments/custom/fastwam_behavior1k_task0/run.py --dry-run
+  python experiments/custom/fastwam_behavior1k_task0/run.py \
+    --profile smoke --run-id task0-smoke-001 --dry-run
 FASTWAM_GPUS_PER_NODE=1 \
-  python experiments/custom/fastwam_behavior1k_task0/run.py
+  python experiments/custom/fastwam_behavior1k_task0/run.py \
+    --profile smoke --run-id task0-smoke-001
 ```
 
 FastWAM 默认 one-step smoke 与 8×A800 的 160-step pilot 均已在真实 Task 0 数据上完成，
@@ -131,6 +135,37 @@ FastWAM 默认 one-step smoke 与 8×A800 的 160-step pilot 均已在真实 Tas
 sparse RGB decode 并关闭 action-only 路线中无收益的 gradient checkpointing。delta 已通过
 离线推理和真实 observation WebSocket 往返，但它不能单独作为 trainer 的 `resume`；
 真实 BEHAVIOR simulator rollout 仍需先完成官方环境、资产和许可准备。
+正式 FastWAM checkpoint 默认写入
+`checkpoints/custom/fastwam/behavior1k_task0_action_only/<run-id>/`；需要续训的任务从首次启动
+使用 `--checkpoint-mode full`，后续可用 `--resume-state` 或 `--resume-latest` 恢复。
+
+100-task / 6×8 FastWAM 正式路线使用独立入口，不改变上述 Task 0 回归配置：
+
+```bash
+# 开发机只做派生资产；原始 BOS 数据始终只读。
+python experiments/custom/fastwam_behavior1k_all/run.py --prepare-only
+python experiments/custom/fastwam_behavior1k_all/run.py --precompute-text-embeds
+
+# 百舸上先做同拓扑 pilot，再启动 35k-step 正式阶段。
+python experiments/custom/fastwam_behavior1k_all/run.py --baige --profile pilot
+python experiments/custom/fastwam_behavior1k_all/run.py --baige --profile full
+```
+
+该路线的 48 卡 global batch、分层任务/技能采样、视觉联合训练、ZeRO-2、分组 LR、
+checkpoint 与 compile 闸门见
+[`docs/FASTWAM_BEHAVIOR1K_6X8_PLAN.md`](docs/FASTWAM_BEHAVIOR1K_6X8_PLAN.md)。
+
+π0.5 Comet 全任务续训使用独立的官方 JAX 后端入口，包含 2026 v3 数据 adapter、WSD、
+双层 checkpoint、精确 resume 和百舸 RDMA fail-fast：
+
+```bash
+python scripts/pi05/doctor.py --require-gpus 4
+python experiments/custom/pi05_comet_behavior1k_all/run.py \
+  --profile four_gpu_smoke --run-id pi05-local-smoke
+```
+
+固定版本、真实四卡性能结果和百舸一次性命令见
+[`docs/PI05_COMET_BEHAVIOR1K_ALL.md`](docs/PI05_COMET_BEHAVIOR1K_ALL.md)。
 
 ## 目录结构
 

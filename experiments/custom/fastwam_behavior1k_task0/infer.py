@@ -230,6 +230,9 @@ def main(argv: list[str] | None = None) -> int:
         "direct_cuda_load": bool(inference_cfg.get("direct_cuda_load", False)),
         "action_horizon": int(inference_cfg.get("action_horizon", 32)),
         "num_inference_steps": int(inference_cfg.get("num_inference_steps", 20)),
+        "normalized_action_clip": float(
+            inference_cfg.get("normalized_action_clip", 5.0)
+        ),
         "seed": int(inference_cfg.get("seed", 42)),
         "task_index": int(config.get("task_index", -1)),
         "task_name": str(config.get("task_name") or "").strip(),
@@ -267,6 +270,7 @@ def main(argv: list[str] | None = None) -> int:
         direct_cuda_load=resolved["direct_cuda_load"],
         action_horizon=resolved["action_horizon"],
         num_inference_steps=resolved["num_inference_steps"],
+        normalized_action_clip=resolved["normalized_action_clip"],
         seed=resolved["seed"],
         task_index=resolved["task_index"],
         task_name=resolved["task_name"],
@@ -283,6 +287,7 @@ def main(argv: list[str] | None = None) -> int:
         "policy_type": "fastwam",
         "action_dim": 23,
         "action_horizon": resolved["action_horizon"],
+        "normalized_action_clip": resolved["normalized_action_clip"],
         "execution_horizon": resolved["server"]["execution_horizon"],
         "checkpoint": paths.checkpoint,
         "model_load_reports": policy.model_load_reports,

@@ -233,6 +233,7 @@ def build_train_command(
             f"--dataset.repo_id={dataset.get('repo_id', 'behavior-1k/2026-challenge-demos')}",
             f"--dataset.video_backend={dataset.get('video_backend', 'pyav')}",
             f"--dataset.eval_split={float(dataset.get('eval_split', 0.0))}",
+            f"--tolerance_s={float(dataset.get('tolerance_s', 5e-4))}",
             "--dataset.use_imagenet_stats=false",
             f"--output_dir={run_dir / 'lerobot_output'}",
             f"--job_name={experiment.get('name', 'pi05_behavior1k_task0')}",

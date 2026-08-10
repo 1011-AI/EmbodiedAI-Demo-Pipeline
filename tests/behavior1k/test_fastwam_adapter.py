@@ -19,6 +19,7 @@ from pipelines.custom.fastwam.behavior1k.adapter import (
     ordered_rgb_observations,
     patch_episode_selection,
     patch_checkpoint_load_report,
+    patch_constant_dimension_normalizer,
     patch_explicit_lerobot_keys,
     patch_sparse_video_decode,
     patch_v3_shard_loading,
@@ -133,7 +134,42 @@ def test_fastwam_config_can_disable_sparse_decode_without_changing_horizons() ->
     assert config["sparse_video_decode"] is False
     assert config["processor"]["num_image_steps"] == 33
     assert config["processor"]["num_obs_steps"] == 33
+
+
+def test_fastwam_config_can_use_shared_physical_range_normalization() -> None:
+    config = build_fastwam_data_config(
+        dataset_root="/dataset/all-tasks",
+        norm_stats_path="/stats/all-tasks.json",
+        text_embedding_cache_dir="/cache/text",
+        episode_indices=[1, 2],
+        norm_default_mode="min/max",
+    )
+
+    assert config["processor"]["norm_default_mode"] == "min/max"
     assert config["num_frames"] - 1 == 32
+
+
+def test_fastwam_training_augmentation_is_mild_and_validation_is_clean() -> None:
+    config = build_fastwam_data_config(
+        dataset_root="/dataset/task0-view",
+        norm_stats_path="/stats/task0.json",
+        text_embedding_cache_dir="/cache/text",
+        image_augmentation={"enabled": True},
+    )
+    train_targets = [item["_target_"] for item in config["processor"]["train_transforms"]]
+    val_targets = [item["_target_"] for item in config["processor"]["val_transforms"]]
+
+    assert train_targets == [
+        "fastwam.datasets.lerobot.transforms.image.ToTensor",
+        "torchvision.transforms.ColorJitter",
+        "torchvision.transforms.RandomAffine",
+        "torchvision.transforms.Resize",
+    ]
+    assert val_targets == [
+        "fastwam.datasets.lerobot.transforms.image.ToTensor",
+        "torchvision.transforms.Resize",
+    ]
+    assert not any("HorizontalFlip" in target for target in train_targets)
 
 
 def _write_fastwam_source_fixture(root: Path) -> None:
@@ -450,7 +486,11 @@ def _write_fastwam_source_fixture(root: Path) -> None:
             "        return action_expert.to(device=device, dtype=torch_dtype)\n"
         ),
         "src/fastwam/trainer.py": (
+            "import json\n"
             "import os\n"
+            "from pathlib import Path\n"
+            "import numpy as np\n"
+            "import torch\n"
             "train_action_expert_only = True\n"
             "\n"
             "def save_checkpoint(self):\n"
@@ -460,6 +500,33 @@ def _write_fastwam_source_fixture(root: Path) -> None:
             "        if self.accelerator.is_main_process:\n"
             "            self._save_trainer_state(state_path)\n"
             "        self.accelerator.wait_for_everyone()\n"
+            "\n"
+            "    def _save_trainer_state(self, state_path: str):\n"
+            "        state_file = os.path.join(state_path, \"trainer_state.json\")\n"
+            "        payload = {\n"
+            "            \"global_step\": int(self.global_step),\n"
+            "            \"epoch\": int(self.epoch),\n"
+            "            \"batch_in_epoch\": int(self.batch_in_epoch),\n"
+            "        }\n"
+            "        with open(state_file, \"w\", encoding=\"utf-8\") as f:\n"
+            "            json.dump(payload, f)\n"
+            "\n"
+            "        ensure_dir(self.eval_dir)\n"
+            "\n"
+            "        # 权重级(.pt)续训必须在 accelerator.prepare() 之前加载: DeepSpeed 初始化后,\n"
+            "        self._preloaded_weights = True\n"
+            "\n"
+            "    def _init_wandb(self):\n"
+            "        pass\n"
+            "\n"
+            "    def train(self):\n"
+            "                with self.accelerator.autocast():\n"
+            "                    loss, loss_dict = train_model.training_loss(sample)\n"
+            "                self.accelerator.backward(loss)\n"
+            "\n"
+            "                if self.accelerator.sync_gradients:\n"
+            "                    grad_norm = self.accelerator.clip_grad_norm_(self.model.parameters(), self.max_grad_norm)\n"
+            "                    self.optimizer.step()\n"
         ),
         "src/fastwam/runtime.py": (
             "import logging\n"
@@ -477,6 +544,36 @@ def _write_fastwam_source_fixture(root: Path) -> None:
             "    with open(Path(cfg.output_dir) / \"config.yaml\", \"w\") as f:\n"
             "        OmegaConf.save(config_payload, f)\n"
         ),
+        "src/fastwam/datasets/lerobot/utils/normalizer.py": '''import torch
+
+class SingleFieldLinearNormalizer:
+    std_reg = 1e-8
+    range_tol = 1e-4
+    output_max = 1.0
+    output_min = -1.0
+    def __init__(self, stats, mode="min/max"):
+        self.stats = stats
+        self.mode = mode
+
+        if mode == "z-score":
+            input_mean, input_std = stats["mean"], stats["std"]
+            scale = 1.0 / (input_std + self.std_reg)
+            offset = - input_mean / (input_std + self.std_reg)
+        else:
+            input_min, input_max = stats["min"], stats["max"]
+            input_range = input_max - input_min
+            ignore_dim = input_range < self.range_tol
+            input_range[ignore_dim] = self.output_max - self.output_min
+            scale = (self.output_max - self.output_min) / input_range
+            offset = self.output_min - scale * input_min
+            offset[ignore_dim] = (self.output_max + self.output_min) / 2 - input_min[ignore_dim]
+        self.scale = scale
+        self.offset = offset
+
+    def backward(self, x: torch.Tensor) -> torch.Tensor:
+        x = (x - self.offset) / self.scale
+        return x
+''',
     }
     for relative, text in files.items():
         path = root / relative
@@ -495,11 +592,13 @@ def test_explicit_lerobot_key_patch_is_source_checked_and_idempotent(tmp_path: P
     sparse_changed = patch_sparse_video_decode(tmp_path)
     copy_checkpoint_report_into_fastwam(tmp_path)
     report_changed = patch_checkpoint_load_report(tmp_path)
+    constant_changed = patch_constant_dimension_normalizer(tmp_path)
     changed_again = patch_explicit_lerobot_keys(tmp_path)
     episode_changed_again = patch_episode_selection(tmp_path)
     v3_changed_again = patch_v3_shard_loading(tmp_path)
     sparse_changed_again = patch_sparse_video_decode(tmp_path)
     report_changed_again = patch_checkpoint_load_report(tmp_path)
+    constant_changed_again = patch_constant_dimension_normalizer(tmp_path)
     after = inspect_fastwam_source(tmp_path)
 
     assert before.explicit_lerobot_key is False
@@ -509,16 +608,19 @@ def test_explicit_lerobot_key_patch_is_source_checked_and_idempotent(tmp_path: P
     assert v3_changed is True
     assert sparse_changed is True
     assert report_changed is True
+    assert constant_changed is True
     assert changed_again is False
     assert episode_changed_again is False
     assert v3_changed_again is False
     assert sparse_changed_again is False
     assert report_changed_again is False
+    assert constant_changed_again is False
     assert after.explicit_lerobot_key is True
     assert after.lerobot_v3_shards is True
     assert after.sparse_video_decode is True
     assert after.direct_cuda_load is True
     assert after.low_memory_checkpoint is True
+    assert after.constant_dimension_inverse is True
     assert after.ready_for_behavior1k_config is True
     model_loader = (
         tmp_path / "src/fastwam/models/wan22/helpers/loader.py"

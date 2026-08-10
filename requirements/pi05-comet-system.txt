@@ -1,0 +1,53 @@
+# Exact versions installed in the default system Python image on 2026-08-08.
+# No virtualenv/conda is used.  torch/torchvision are CUDA 13 wheels supplied
+# by the image's configured NVIDIA/PyTorch package index.
+torch==2.11.0+cu130
+torchvision==0.26.0+cu130
+jax==0.5.3
+jaxlib==0.5.3
+jax-cuda12-plugin==0.5.3
+jax-cuda12-pjrt==0.5.3
+flax==0.10.2
+orbax-checkpoint==0.11.13
+optax==0.2.5
+chex==0.1.90
+ml-dtypes==0.4.1
+tensorstore==0.1.74
+augmax==0.4.1
+beartype==0.19.0
+dm-tree==0.1.10
+einops==0.8.2
+equinox==0.12.2
+etils==1.14.0
+flatbuffers==25.12.19
+fsspec==2025.10.0
+gcsfs==2025.10.0
+imageio==2.37.4
+jaxtyping==0.2.36
+ml_collections==1.0.0
+numpy==1.26.4
+numpydantic==1.8.1
+opencv-python-headless==4.11.0.86
+pillow==12.1.1
+sentencepiece==0.2.2
+tqdm-loggable==0.4.1
+typing-extensions==4.15.0
+tyro==1.0.15
+wandb==0.24.2
+filelock==3.25.2
+treescope==0.1.10
+transformers==4.53.2
+rich==15.0.0
+polars==1.43.2
+lerobot==0.5.2
+av==16.1.0
+pyarrow==25.0.0
+pandas==3.0.5
+PyYAML==6.0.3
+pytest==8.4.2
+
+# Editable system installs are pinned by their checked-out repositories:
+# openpi + openpi-client @ mli0603/openpi-comet
+#   4bb2aa7bb2da32614cac128ebb4b2f96eb66e5b5
+# lerobot @ wensi-ai/lerobot
+#   c43f58116b975ae79af62714e1417b38facd4e37

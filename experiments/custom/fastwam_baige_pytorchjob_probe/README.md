@@ -9,7 +9,7 @@
 ```bash
 cd /mnt/mnt/pfs/dingxibo/EmbodiedAI-Demo-Pipeline
 git pull origin main
-bash scripts/cluster/baige_run_fastwam.sh
+python experiments/custom/fastwam_baige_pytorchjob_probe/run.py
 ```
 
 Pro6000/sm120 当前无 RDMA，入口脚本默认设置 `NCCL_IB_DISABLE=1`。

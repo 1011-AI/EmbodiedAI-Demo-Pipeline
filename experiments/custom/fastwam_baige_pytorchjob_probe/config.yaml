@@ -9,7 +9,7 @@
 # 推荐 command：
 #   cd /mnt/mnt/pfs/dingxibo/EmbodiedAI-Demo-Pipeline && \
 #   git pull origin main && \
-#   bash scripts/cluster/baige_run_fastwam.sh
+#   python experiments/custom/fastwam_baige_pytorchjob_probe/run.py
 
 backend: fastwam
 base_config: configs/fastwam/realrobot_train_eval.sh
@@ -65,7 +65,8 @@ fastwam:
   text_embeddings:
     # 测速默认不预计算，要求已有 text_embeds_cache。
     # 如果首次缺缓存，可临时改成 auto 或执行：
-    #   FASTWAM_PRECOMPUTE_TEXT_EMBEDS=auto bash scripts/cluster/baige_run_fastwam.sh
+    #   FASTWAM_PRECOMPUTE_TEXT_EMBEDS=auto \
+    #     python experiments/custom/fastwam_baige_pytorchjob_probe/run.py
     precompute: false
     gpus: 8
     overwrite: false

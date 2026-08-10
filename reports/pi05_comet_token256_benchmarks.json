@@ -1,0 +1,51 @@
+{
+  "fastest_run_id": "pi05-bench-token256-b128-io8-v1",
+  "records": [
+    {
+      "compute_windows_per_second": 29.395932877237037,
+      "data_wait_p95_seconds": 0.03964551800163463,
+      "data_wait_seconds": 0.024725168718889887,
+      "end_to_end_windows_per_second": 28.743088064050266,
+      "global_batch_size": 32,
+      "gpu_avg_power_w": 365.4575,
+      "gpu_avg_util_percent": 95.59375,
+      "gpu_count": 4,
+      "gpu_max_memory_mib": 88511.0,
+      "gpu_samples": 32,
+      "jax_peak_memory_gib": 21.869508743286133,
+      "loss_finite": true,
+      "micro_batch_per_device": 8,
+      "oom": false,
+      "optimizer_step_seconds": 1.0885859664205262,
+      "prefetch_factor": 4,
+      "profile": "benchmark_b8_io8",
+      "run_id": "pi05-bench-token256-b8-io8-v1",
+      "stable_steps": 7,
+      "workers": 8
+    },
+    {
+      "compute_windows_per_second": 52.8224717365628,
+      "data_wait_p95_seconds": 0.6123717599839438,
+      "data_wait_seconds": 0.14685142359230668,
+      "end_to_end_windows_per_second": 52.034128753020944,
+      "global_batch_size": 512,
+      "gpu_avg_power_w": 556.8006914893617,
+      "gpu_avg_util_percent": 96.7872340425532,
+      "gpu_count": 4,
+      "gpu_max_memory_mib": 88517.0,
+      "gpu_samples": 188,
+      "jax_peak_memory_gib": 61.211846351623535,
+      "loss_finite": true,
+      "micro_batch_per_device": 128,
+      "oom": false,
+      "optimizer_step_seconds": 9.692844412004343,
+      "prefetch_factor": 4,
+      "profile": "benchmark_b128_io8",
+      "run_id": "pi05-bench-token256-b128-io8-v1",
+      "stable_steps": 5,
+      "workers": 8
+    }
+  ],
+  "schema_version": "1.0",
+  "stable_interval_excludes_compile_steps": true
+}

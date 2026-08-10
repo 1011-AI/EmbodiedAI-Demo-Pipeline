@@ -42,24 +42,25 @@ python experiments/custom/fastwam_behavior1k_task0/infer.py
 5. 对照数据集 `meta/tasks.jsonl` 校验 Task 0 的完整英文 instruction，并通过
    `RobotVideoDataset._get_cached_text_context()` 加载训练时同一份 T5 context；
 6. 调用 `FastWAM.infer_action()`；
-7. 通过 Processor 内的 merger 与 normalizer 反向路径恢复原始 23D action；
+7. 将 normalized action 截断到训练使用的 `[-5,5]` 支持域，再通过 Processor 内的
+   merger 与 normalizer 反向路径恢复原始 23D action；
 8. 写出 `inference_evidence.json`、`base_model_load_report.json` 和
    `delta_model_load_report.json`。
 
 输出 action chunk 固定为 finite、contiguous `float32[T,23]`。`T` 默认 32。
+数据集 min/max 是训练观测范围，并非机器人物理限位，因此推理入口不会用它裁剪原始动作；
+执行侧仍必须根据 R1Pro 的真实关节、夹爪和底盘规格实施安全限位。
 `turning_on_radio` 只是 task slug，不能替代完整 instruction；否则 prompt hash
 会与训练缓存不一致，入口会在加载 5B 模型前报错。
 
 `inference.yaml` 的 `direct_cuda_load: true` 会在模型构造和 checkpoint
-加载之前显式启用低 CPU 内存路径。训练端 `low_memory_checkpoint: true`
+加载之前显式启用低 CPU 内存路径。训练端 `checkpoints.mode: delta`
 写出的是基于 release checkpoint 的 action/proprio delta；它可用于真实推理，
-但不能直接作为 trainer 的单一 `resume` 继续训练。续训需要实现 base->delta
-双预载，或在大内存环境保存 full state。
+但不能直接作为 trainer 的单一 `resume` 继续训练。需要续训时应从第一次启动就使用
+`--checkpoint-mode full`，再通过 `--resume-state` 或 `--resume-latest` 恢复完整状态。
 
-若节点镜像已经提供兼容的 Torch/CUDA，而 FastWAM 的非 Torch 依赖安装在项目
-`.venv_fastwam` 中，`paths.python_overlay` 会自动发现对应的 `site-packages` 并加入
-运行路径。训练和推理命令都不需要手写 `PYTHONPATH`。若当前 conda/venv 本身已完整安装
-依赖，项目内 overlay 可以不存在；需要换位置时设置 `FASTWAM_PYTHON_OVERLAY`。
+训练与推理都直接使用节点镜像的默认 Python 环境。镜像构建前应在开发机默认环境安装
+完整 FastWAM 依赖；入口不会创建、发现或激活项目内虚拟环境。
 
 ## 已验证结果（2026-08-03）
 

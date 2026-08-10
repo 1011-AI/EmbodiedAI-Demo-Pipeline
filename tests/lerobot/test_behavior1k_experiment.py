@@ -42,8 +42,9 @@ def test_train_command_uses_real_behavior_adapter_and_yaml_values(tmp_path: Path
     assert "--policy.type=pi05" in command
     assert "--policy.use_relative_actions=false" in command
     assert "--dataset.use_imagenet_stats=false" in command
+    assert "--tolerance_s=0.0005" in command
     assert "--steps=2" in command
-    assert "--batch_size=8" in command
+    assert "--batch_size=16" in command
     assert "--save_checkpoint=true" in command
     assert "--policy.train_expert_only=true" in command
     assert "--policy.gradient_checkpointing=false" in command

@@ -1,0 +1,19 @@
+{
+  "schema_version": "1.0",
+  "tree_hash_algorithm": "sha256-path-length-path-size-content-v1",
+  "openpi_comet": {
+    "revision": "4bb2aa7bb2da32614cac128ebb4b2f96eb66e5b5",
+    "source_root": "upstreams/openpi_comet/src/openpi",
+    "python_files": 52,
+    "python_tree_sha256": "253d24ff3896001b925f5bf27eb3b2f1debea668cf07496dbff55f7198248461"
+  },
+  "lerobot": {
+    "revision": "c43f58116b975ae79af62714e1417b38facd4e37",
+    "source_root": "upstreams/lerobot_b1k/src/lerobot",
+    "python_files": 398,
+    "python_tree_sha256": "51a815abc20f6400f43904ec99da7c2abe6feef9278f1f8a485f474893907e54"
+  },
+  "artifacts": {
+    "overlays/pi05_comet/openpi_comet.patch": "1541d6a29fc60b91419a4e31ee24ac30f2afa183a93600cb31cf7a9d3f553c25"
+  }
+}

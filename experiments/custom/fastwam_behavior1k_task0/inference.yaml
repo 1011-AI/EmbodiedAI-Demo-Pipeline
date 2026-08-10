@@ -1,7 +1,7 @@
 # FastWAM + BEHAVIOR-1K Task 0 真实 checkpoint 推理与 policy server 配置。
 #
 # 最短用法（不手写模型参数）：
-#   export FASTWAM_NATIVE_RUN_DIR=/path/to/FastWAM-realrobot/runs/behavior1k_task0_action_only/<run_id>
+#   export FASTWAM_NATIVE_RUN_DIR=/path/to/EmbodiedAI-Demo-Pipeline/checkpoints/custom/fastwam/behavior1k_task0_action_only/<run_id>
 #   python experiments/custom/fastwam_behavior1k_task0/infer.py --dry-run
 #   python experiments/custom/fastwam_behavior1k_task0/infer.py
 #
@@ -42,11 +42,6 @@ paths:
   # 设置 DIFFSYNTH_MODEL_BASE_PATH，并强制 DIFFSYNTH_SKIP_DOWNLOAD=true。
   model_base: models
 
-  # 可选系统 Torch + 项目依赖 overlay。入口会自动发现其中与当前 Python
-  # 对应的 site-packages，不需要手写 PYTHONPATH；完整环境中目录可不存在。
-  python_overlay: .venv_fastwam
-  python_overlay_env: FASTWAM_PYTHON_OVERLAY
-
   # 推理证据、checkpoint load report 都写到这里；不会写入原数据集。
   output_dir: runs/experiments/custom/fastwam_behavior1k_task0/inference
 
@@ -65,6 +60,9 @@ inference:
   # FastWAM 一次预测完整 action chunk；扩散步数必须与实验记录一起保存。
   action_horizon: 32
   num_inference_steps: 20
+  # 训练端将 z-score target 截断到 [-5,5]；推理反归一化前使用相同边界。
+  # 数据集 min/max 不是机器人物理限位，因此不拿它做输出硬裁剪。
+  normalized_action_clip: 5.0
   seed: 42
 
 server:

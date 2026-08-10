@@ -1,0 +1,703 @@
+schema_version: "1.0"
+backend: openpi_comet_jax
+
+experiment:
+  name: pi05_comet_behavior1k_all
+  profile: four_gpu_smoke
+
+versions:
+  openpi_comet_commit: 4bb2aa7bb2da32614cac128ebb4b2f96eb66e5b5
+  base_model_repo: sunshk/openpi_comet
+  base_model_revision: 61739ffbced89dd5ba1b87c30d93d6084b79b0af
+  base_model_subdir: pi05-b1kpt50-cs32
+  lerobot_commit: c43f58116b975ae79af62714e1417b38facd4e37
+
+paths:
+  dataset_root: /mnt/cfs/data_file_0/datasets/2026-challenge-demos
+  base_checkpoint: models/openpi_comet/pi05-b1kpt50-cs32
+  data_contract_dir: data/custom/pi05_comet/behavior1k
+  run_root: runs/pi05_comet/pi05_comet_behavior1k_all
+  checkpoint_root: checkpoints/pi05_comet/pi05_comet_behavior1k_all
+  log_root: logs/pi05_comet/pi05_comet_behavior1k_all
+  cache_root: .cache/pi05
+
+model:
+  family: pi0.5
+  implementation: openpi-comet-jax
+  action_horizon: 32
+  # The released Comet default (200) truncates ten long 2026 task prompts once
+  # PI0.5's 32 discrete state values are appended.  A full-vocabulary audit
+  # proves 256 covers every task and every possible state bin with 15 tokens
+  # of headroom, without changing any checkpoint parameter shape.
+  max_token_len: 256
+  model_action_dim: 32
+  behavior_action_dim: 23
+  behavior_raw_state_dim: 61
+  dtype: bfloat16
+  attention_implementation: einsum
+  gemma_remat_policy: nothing_saveable
+  siglip_remat_policy: nothing_saveable
+  finetune: full
+  train_vision: true
+  train_vlm: true
+  train_action_expert: true
+  ema: false
+
+data:
+  train_manifest: all_tasks_train19800_seed42_h32_sampling.json
+  validation_manifest: all_tasks_val200_seed42_h32_sampling.json
+  dataset_fingerprint: dataset_fingerprint.json
+  contract: behavior1k_all_contract.json
+  normalization_audit: normalization_audit.json
+  language_audit: language_audit.json
+  num_workers: 4
+  prefetch_factor: 2
+  persistent_workers: true
+  sampling:
+    natural_probability: 0.70
+    skill_probability: 0.20
+    boundary_probability: 0.10
+    task_reuse_steps: 2
+    episode_reuse_steps: 2
+    window_batch_locality_span: 96
+  augmentation:
+    geometry: disabled
+    color_jitter: shared_across_temporal_window_and_cameras
+    brightness: 0.2
+    contrast: 0.2
+    saturation: 0.2
+
+training:
+  seed: 42
+  micro_batch_per_device: 1
+  gradient_accumulation: 1
+  max_steps: 3
+  optimizer:
+    type: adamw
+    b1: 0.9
+    b2: 0.95
+    eps: 1.0e-8
+    weight_decay: 1.0e-10
+    clip_gradient_norm: 1.0
+  scheduler:
+    type: wsd
+    peak_lr: 1.0e-6
+    warmup_steps: 1000
+    stable_steps: 1999000
+    decay_steps: 0
+    end_lr: 1.0e-7
+  log_interval: 1
+  gradient_audit_interval: 1
+  validation_interval: 3
+  validation_micro_batch_per_device: 1
+  validation_batches: 1
+  weights_interval: 3
+  state_interval: 3
+  weights_to_keep: 5
+  states_to_keep: 3
+  throughput_warmup_steps: 2
+  throughput_window_steps: 20
+  validate_at_end: true
+  checkpoint_at_end: true
+
+runtime:
+  devices_per_node: 4
+  fsdp_devices: local
+  jax_memory_fraction: 0.90
+  xla_flags: ""
+  rdma: auto
+  nccl_debug: WARN
+
+profiles:
+  data_smoke:
+    runtime:
+      devices_per_node: 1
+    data:
+      num_workers: 0
+      persistent_workers: false
+
+  single_gpu_smoke:
+    runtime:
+      devices_per_node: 1
+      fsdp_devices: local
+    data:
+      num_workers: 0
+      persistent_workers: false
+    training:
+      micro_batch_per_device: 1
+      max_steps: 2
+      validation_interval: 1
+      validation_batches: 1
+      weights_interval: 1
+      state_interval: 1
+      throughput_warmup_steps: 1
+
+  four_gpu_smoke:
+    model:
+      attention_implementation: xla
+    runtime:
+      devices_per_node: 4
+      fsdp_devices: local
+      xla_flags: --xla_gpu_enable_latency_hiding_scheduler=true
+    data:
+      num_workers: 4
+      prefetch_factor: 2
+      persistent_workers: true
+    training:
+      micro_batch_per_device: 1
+      max_steps: 3
+      validation_interval: 3
+      weights_interval: 3
+      state_interval: 3
+      throughput_warmup_steps: 2
+
+  four_gpu_weight_reload_smoke:
+    model:
+      attention_implementation: xla
+    runtime:
+      devices_per_node: 4
+      fsdp_devices: local
+      xla_flags: --xla_gpu_enable_latency_hiding_scheduler=true
+    data:
+      num_workers: 4
+      prefetch_factor: 2
+      persistent_workers: true
+    training:
+      micro_batch_per_device: 1
+      max_steps: 1
+      validation_interval: 1000000
+      weights_interval: 1000000
+      state_interval: 1000000
+      throughput_warmup_steps: 1
+      validate_at_end: false
+      checkpoint_at_end: false
+
+  four_gpu_final_acceptance:
+    model:
+      attention_implementation: xla
+    runtime:
+      devices_per_node: 4
+      fsdp_devices: local
+      xla_flags: --xla_gpu_enable_latency_hiding_scheduler=true
+    data:
+      num_workers: 4
+      prefetch_factor: 2
+      persistent_workers: true
+    training:
+      micro_batch_per_device: 1
+      max_steps: 2
+      validation_interval: 2
+      validation_batches: 1
+      weights_interval: 2
+      state_interval: 2
+      throughput_warmup_steps: 1
+
+  benchmark_b1:
+    runtime:
+      devices_per_node: 4
+      fsdp_devices: local
+    training:
+      micro_batch_per_device: 1
+      max_steps: 12
+      validation_interval: 1000000
+      weights_interval: 1000000
+      state_interval: 1000000
+      throughput_warmup_steps: 5
+      validate_at_end: false
+      checkpoint_at_end: false
+
+  benchmark_b2:
+    runtime:
+      devices_per_node: 4
+      fsdp_devices: local
+    training:
+      micro_batch_per_device: 2
+      max_steps: 12
+      validation_interval: 1000000
+      weights_interval: 1000000
+      state_interval: 1000000
+      throughput_warmup_steps: 5
+      validate_at_end: false
+      checkpoint_at_end: false
+
+  benchmark_b4:
+    runtime:
+      devices_per_node: 4
+      fsdp_devices: local
+    training:
+      micro_batch_per_device: 4
+      max_steps: 12
+      validation_interval: 1000000
+      weights_interval: 1000000
+      state_interval: 1000000
+      throughput_warmup_steps: 5
+      validate_at_end: false
+      checkpoint_at_end: false
+
+  benchmark_b8:
+    runtime:
+      devices_per_node: 4
+      fsdp_devices: local
+    training:
+      micro_batch_per_device: 8
+      max_steps: 12
+      validation_interval: 1000000
+      weights_interval: 1000000
+      state_interval: 1000000
+      throughput_warmup_steps: 5
+      validate_at_end: false
+      checkpoint_at_end: false
+
+  # Matches the formal input-pipeline settings so the selected cluster micro
+  # batch is benchmarked under its real worker/prefetch contract.
+  benchmark_b8_io8:
+    runtime:
+      devices_per_node: 4
+      fsdp_devices: local
+    data:
+      num_workers: 8
+      prefetch_factor: 4
+      persistent_workers: true
+    training:
+      micro_batch_per_device: 8
+      max_steps: 12
+      validation_interval: 1000000
+      weights_interval: 1000000
+      state_interval: 1000000
+      throughput_warmup_steps: 5
+      validate_at_end: false
+      checkpoint_at_end: false
+
+  benchmark_b8_io8_vision_dots:
+    model:
+      siglip_remat_policy: dots_with_no_batch_dims_saveable
+    runtime:
+      devices_per_node: 4
+      fsdp_devices: local
+    data:
+      num_workers: 8
+      prefetch_factor: 4
+      persistent_workers: true
+    training:
+      micro_batch_per_device: 8
+      max_steps: 12
+      validation_interval: 1000000
+      weights_interval: 1000000
+      state_interval: 1000000
+      throughput_warmup_steps: 5
+      validate_at_end: false
+      checkpoint_at_end: false
+
+  benchmark_b8_io8_all_dots:
+    model:
+      gemma_remat_policy: dots_with_no_batch_dims_saveable
+      siglip_remat_policy: dots_with_no_batch_dims_saveable
+    runtime:
+      devices_per_node: 4
+      fsdp_devices: local
+    data:
+      num_workers: 8
+      prefetch_factor: 4
+      persistent_workers: true
+    training:
+      micro_batch_per_device: 8
+      max_steps: 12
+      validation_interval: 1000000
+      weights_interval: 1000000
+      state_interval: 1000000
+      throughput_warmup_steps: 5
+      validate_at_end: false
+      checkpoint_at_end: false
+
+  benchmark_b8_io8_cudnn_all_dots:
+    model:
+      attention_implementation: cudnn
+      gemma_remat_policy: dots_with_no_batch_dims_saveable
+      siglip_remat_policy: dots_with_no_batch_dims_saveable
+    runtime:
+      devices_per_node: 4
+      fsdp_devices: local
+    data:
+      num_workers: 8
+      prefetch_factor: 4
+      persistent_workers: true
+    training:
+      micro_batch_per_device: 8
+      max_steps: 12
+      validation_interval: 1000000
+      weights_interval: 1000000
+      state_interval: 1000000
+      throughput_warmup_steps: 5
+      validate_at_end: false
+      checkpoint_at_end: false
+
+  benchmark_b8_io8_cudnn:
+    model:
+      attention_implementation: cudnn
+    runtime:
+      devices_per_node: 4
+      fsdp_devices: local
+    data:
+      num_workers: 8
+      prefetch_factor: 4
+      persistent_workers: true
+    training:
+      micro_batch_per_device: 8
+      max_steps: 12
+      validation_interval: 1000000
+      weights_interval: 1000000
+      state_interval: 1000000
+      throughput_warmup_steps: 5
+      validate_at_end: false
+      checkpoint_at_end: false
+
+  benchmark_b8_io8_xla_attention:
+    model:
+      attention_implementation: xla
+    runtime:
+      devices_per_node: 4
+      fsdp_devices: local
+    data:
+      num_workers: 8
+      prefetch_factor: 4
+      persistent_workers: true
+    training:
+      micro_batch_per_device: 8
+      max_steps: 12
+      validation_interval: 1000000
+      weights_interval: 1000000
+      state_interval: 1000000
+      throughput_warmup_steps: 5
+      validate_at_end: false
+      checkpoint_at_end: false
+
+  benchmark_b8_io8_xla_attention_lhs:
+    model:
+      attention_implementation: xla
+    runtime:
+      devices_per_node: 4
+      fsdp_devices: local
+      xla_flags: --xla_gpu_enable_latency_hiding_scheduler=true
+    data:
+      num_workers: 8
+      prefetch_factor: 4
+      persistent_workers: true
+    training:
+      micro_batch_per_device: 8
+      max_steps: 12
+      validation_interval: 1000000
+      weights_interval: 1000000
+      state_interval: 1000000
+      throughput_warmup_steps: 5
+      validate_at_end: false
+      checkpoint_at_end: false
+
+  benchmark_b8_io8_xla_attention_lhs_pipelined:
+    model:
+      attention_implementation: xla
+    runtime:
+      devices_per_node: 4
+      fsdp_devices: local
+      xla_flags: "--xla_gpu_enable_latency_hiding_scheduler=true --xla_gpu_enable_pipelined_collectives=true"
+    data:
+      num_workers: 8
+      prefetch_factor: 4
+      persistent_workers: true
+    training:
+      micro_batch_per_device: 8
+      max_steps: 12
+      validation_interval: 1000000
+      weights_interval: 1000000
+      state_interval: 1000000
+      throughput_warmup_steps: 5
+      validate_at_end: false
+      checkpoint_at_end: false
+
+  benchmark_b8_io8_xla_vision_no_remat:
+    model:
+      attention_implementation: xla
+      siglip_remat_policy: none
+    runtime:
+      devices_per_node: 4
+      fsdp_devices: local
+    data:
+      num_workers: 8
+      prefetch_factor: 4
+      persistent_workers: true
+    training:
+      micro_batch_per_device: 8
+      max_steps: 12
+      validation_interval: 1000000
+      weights_interval: 1000000
+      state_interval: 1000000
+      throughput_warmup_steps: 5
+      validate_at_end: false
+      checkpoint_at_end: false
+
+  benchmark_b8_io8_xla_gemma_no_remat:
+    model:
+      attention_implementation: xla
+      gemma_remat_policy: none
+    runtime:
+      devices_per_node: 4
+      fsdp_devices: local
+    data:
+      num_workers: 8
+      prefetch_factor: 4
+      persistent_workers: true
+    training:
+      micro_batch_per_device: 8
+      max_steps: 12
+      validation_interval: 1000000
+      weights_interval: 1000000
+      state_interval: 1000000
+      throughput_warmup_steps: 5
+      validate_at_end: false
+      checkpoint_at_end: false
+
+  benchmark_b8_io8_xla_all_no_remat:
+    model:
+      attention_implementation: xla
+      gemma_remat_policy: none
+      siglip_remat_policy: none
+    runtime:
+      devices_per_node: 4
+      fsdp_devices: local
+    data:
+      num_workers: 8
+      prefetch_factor: 4
+      persistent_workers: true
+    training:
+      micro_batch_per_device: 8
+      max_steps: 12
+      validation_interval: 1000000
+      weights_interval: 1000000
+      state_interval: 1000000
+      throughput_warmup_steps: 5
+      validate_at_end: false
+      checkpoint_at_end: false
+
+  benchmark_b8_io8_fsdp2:
+    runtime:
+      devices_per_node: 4
+      fsdp_devices: 2
+    data:
+      num_workers: 8
+      prefetch_factor: 4
+      persistent_workers: true
+    training:
+      micro_batch_per_device: 8
+      max_steps: 12
+      validation_interval: 1000000
+      weights_interval: 1000000
+      state_interval: 1000000
+      throughput_warmup_steps: 5
+      validate_at_end: false
+      checkpoint_at_end: false
+
+  benchmark_b8_io8_sparse_grad_audit:
+    runtime:
+      devices_per_node: 4
+      fsdp_devices: local
+    data:
+      num_workers: 8
+      prefetch_factor: 4
+      persistent_workers: true
+    training:
+      micro_batch_per_device: 8
+      gradient_audit_interval: 1000
+      max_steps: 12
+      validation_interval: 1000000
+      weights_interval: 1000000
+      state_interval: 1000000
+      throughput_warmup_steps: 5
+      validate_at_end: false
+      checkpoint_at_end: false
+
+  benchmark_b8_io8_xla_sparse_grad_audit:
+    model:
+      attention_implementation: xla
+    runtime:
+      devices_per_node: 4
+      fsdp_devices: local
+    data:
+      num_workers: 8
+      prefetch_factor: 4
+      persistent_workers: true
+    training:
+      micro_batch_per_device: 8
+      gradient_audit_interval: 1000
+      max_steps: 12
+      validation_interval: 1000000
+      weights_interval: 1000000
+      state_interval: 1000000
+      throughput_warmup_steps: 5
+      validate_at_end: false
+      checkpoint_at_end: false
+
+  benchmark_b16:
+    runtime:
+      devices_per_node: 4
+      fsdp_devices: local
+    training:
+      micro_batch_per_device: 16
+      max_steps: 12
+      validation_interval: 1000000
+      weights_interval: 1000000
+      state_interval: 1000000
+      throughput_warmup_steps: 5
+      validate_at_end: false
+      checkpoint_at_end: false
+
+  benchmark_b32:
+    runtime:
+      devices_per_node: 4
+      fsdp_devices: local
+    training:
+      micro_batch_per_device: 32
+      max_steps: 12
+      validation_interval: 1000000
+      weights_interval: 1000000
+      state_interval: 1000000
+      throughput_warmup_steps: 5
+      validate_at_end: false
+      checkpoint_at_end: false
+
+  benchmark_b32_io8:
+    runtime:
+      devices_per_node: 4
+      fsdp_devices: local
+    data:
+      num_workers: 8
+      prefetch_factor: 4
+      persistent_workers: true
+    training:
+      micro_batch_per_device: 32
+      max_steps: 12
+      validation_interval: 1000000
+      weights_interval: 1000000
+      state_interval: 1000000
+      throughput_warmup_steps: 5
+      validate_at_end: false
+      checkpoint_at_end: false
+
+  benchmark_b64_io8:
+    runtime:
+      devices_per_node: 4
+      fsdp_devices: local
+    data:
+      num_workers: 8
+      prefetch_factor: 4
+      persistent_workers: true
+    training:
+      micro_batch_per_device: 64
+      max_steps: 12
+      validation_interval: 1000000
+      weights_interval: 1000000
+      state_interval: 1000000
+      throughput_warmup_steps: 5
+      validate_at_end: false
+      checkpoint_at_end: false
+
+  benchmark_b128_io8:
+    runtime:
+      devices_per_node: 4
+      fsdp_devices: local
+    data:
+      num_workers: 8
+      prefetch_factor: 4
+      persistent_workers: true
+    training:
+      micro_batch_per_device: 128
+      max_steps: 10
+      validation_interval: 1000000
+      weights_interval: 1000000
+      state_interval: 1000000
+      throughput_warmup_steps: 5
+      validate_at_end: false
+      checkpoint_at_end: false
+
+  pilot:
+    model:
+      attention_implementation: xla
+    runtime:
+      devices_per_node: auto
+      expected_nodes: 6
+      expected_devices_per_node: 8
+      fsdp_devices: local
+      xla_flags: --xla_gpu_enable_latency_hiding_scheduler=true
+      nccl_debug: INFO
+      rdma: required
+    data:
+      num_workers: 8
+      prefetch_factor: 4
+    training:
+      micro_batch_per_device: 8
+      max_steps: 100
+      log_interval: 5
+      validation_interval: 50
+      validation_batches: 4
+      weights_interval: 50
+      state_interval: 100
+      throughput_warmup_steps: 10
+      throughput_window_steps: 50
+
+  formal:
+    model:
+      attention_implementation: xla
+    runtime:
+      devices_per_node: auto
+      expected_nodes: 6
+      expected_devices_per_node: 8
+      fsdp_devices: local
+      xla_flags: --xla_gpu_enable_latency_hiding_scheduler=true
+      nccl_debug: WARN
+      rdma: required
+    data:
+      num_workers: 8
+      prefetch_factor: 4
+    training:
+      micro_batch_per_device: 8
+      max_steps: 2000000
+      log_interval: 20
+      validation_interval: 1000
+      validation_batches: 20
+      weights_interval: 1000
+      state_interval: 5000
+      throughput_warmup_steps: 20
+      throughput_window_steps: 100
+
+  # Select this profile at the initial warm-start if the run must enter a
+  # fixed 100k-step cosine decay. Exact resume intentionally rejects a later
+  # scheduler/profile change.
+  formal_decay:
+    model:
+      attention_implementation: xla
+    runtime:
+      devices_per_node: auto
+      expected_nodes: 6
+      expected_devices_per_node: 8
+      fsdp_devices: local
+      xla_flags: --xla_gpu_enable_latency_hiding_scheduler=true
+      nccl_debug: WARN
+      rdma: required
+    data:
+      num_workers: 8
+      prefetch_factor: 4
+    training:
+      micro_batch_per_device: 8
+      max_steps: 2000000
+      scheduler:
+        type: wsd
+        peak_lr: 1.0e-6
+        warmup_steps: 1000
+        stable_steps: 1899000
+        decay_steps: 100000
+        end_lr: 1.0e-7
+      log_interval: 20
+      validation_interval: 1000
+      validation_batches: 20
+      weights_interval: 1000
+      state_interval: 5000
+      throughput_warmup_steps: 20
+      throughput_window_steps: 100

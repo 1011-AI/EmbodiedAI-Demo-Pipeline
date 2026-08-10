@@ -12,6 +12,7 @@ from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -512,6 +513,7 @@ class FastWAMBehaviorPolicy:
         device: str = "cuda:0",
         action_horizon: int = 32,
         num_inference_steps: int = 20,
+        normalized_action_clip: float = 5.0,
         seed: int = 42,
         task_index: int,
         task_name: str,
@@ -523,6 +525,10 @@ class FastWAMBehaviorPolicy:
             raise FastWAMBehaviorContractError("action_horizon must be positive")
         if num_inference_steps <= 0:
             raise FastWAMBehaviorContractError("num_inference_steps must be positive")
+        if not math.isfinite(normalized_action_clip) or normalized_action_clip <= 0:
+            raise FastWAMBehaviorContractError(
+                "normalized_action_clip must be finite and positive"
+            )
         if not task_instruction.strip():
             raise FastWAMBehaviorContractError("task_instruction must not be empty")
 
@@ -561,6 +567,7 @@ class FastWAMBehaviorPolicy:
         self.device = device
         self.action_horizon = int(action_horizon)
         self.num_inference_steps = int(num_inference_steps)
+        self.normalized_action_clip = float(normalized_action_clip)
         self.base_seed = int(seed)
         self._chunk_index = 0
         self._np = np
@@ -697,6 +704,14 @@ class FastWAMBehaviorPolicy:
                 f"FastWAM normalized action must be [T,{ACTION_DIM}], "
                 f"got {tuple(normalized.shape)}"
             )
+        # Training clamps z-scored action targets to [-5, 5].  Keep inference
+        # inside that learned support before applying the exact inverse
+        # normalizer.  Dataset min/max are deliberately not used as actuator
+        # limits: observed extrema are not robot safety limits.
+        normalized = normalized.clamp(
+            min=-self.normalized_action_clip,
+            max=self.normalized_action_clip,
+        )
         if proprio.ndim == 1:
             proprio = proprio.unsqueeze(0)
         if proprio.ndim != 2 or proprio.shape[-1] != POLICY_STATE_DIM:

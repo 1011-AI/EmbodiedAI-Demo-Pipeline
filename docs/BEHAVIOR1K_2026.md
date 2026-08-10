@@ -474,30 +474,32 @@ FASTWAM_PREPARE_LIBERO_DATA=0 \
   FASTWAM_SOURCE_MODE=sync \
   bash scripts/fastwam/prepare_fastwam_overlay.sh
 
-# 以下三条在可读取原始数据、内存充足的管理节点执行。
-export BEHAVIOR1K_DATA_ROOT=/path/to/2026-challenge-demos
-
 # 发现真实 200 episodes，生成 23D stats 并安装固定版本 overlay 配置。
-python experiments/custom/fastwam_behavior1k_task0/run.py --prepare-only
+python experiments/custom/fastwam_behavior1k_task0/run.py \
+  --dataset-root /path/to/2026-challenge-demos \
+  --prepare-only
 
 # UMT5 权重约 11 GB；只在管理节点预计算一次，命中缓存时会直接复用。
-python experiments/custom/fastwam_behavior1k_task0/run.py --precompute-text-embeds
+python experiments/custom/fastwam_behavior1k_task0/run.py \
+  --dataset-root /path/to/2026-challenge-demos \
+  --precompute-text-embeds
 
 # 以下命令在 GPU 节点执行。若 GPU 可直接读取完整共享 mount，可继续使用上面的根目录；
-# 否则改为先前物化的 Task 0 根目录。
-export BEHAVIOR1K_DATA_ROOT=/path/to/2026-challenge-demos-or-task0-materialized
-
+# 否则把 --dataset-root 改为先前物化的 Task 0 根目录。
 # 使用上游真实 LeRobot loader 读取一条样本并核对 tensor shape。
-python experiments/custom/fastwam_behavior1k_task0/run.py --dataset-smoke
+python experiments/custom/fastwam_behavior1k_task0/run.py \
+  --dataset-root /path/to/2026-challenge-demos-or-task0-materialized \
+  --dataset-smoke
 
 # 先解析完整命令，再启动默认 one-step CUDA smoke。
-python experiments/custom/fastwam_behavior1k_task0/run.py --dry-run
-python experiments/custom/fastwam_behavior1k_task0/run.py
+python experiments/custom/fastwam_behavior1k_task0/run.py \
+  --profile smoke --run-id task0-smoke-001 --dry-run
+python experiments/custom/fastwam_behavior1k_task0/run.py \
+  --profile smoke --run-id task0-smoke-001
 ```
 
-目标镜像若提供系统 Torch/CUDA、其余依赖位于项目 `.venv_fastwam`，YAML 中的
-`paths.python_overlay` 会自动解析对应 `site-packages`；训练和推理均不需要手写
-`PYTHONPATH`。完整 conda/venv 环境可不创建该目录。
+目标镜像直接使用默认 Python/Torch/CUDA。项目准备、训练和推理入口不会激活 conda/venv，
+也不要求项目内 Python overlay；镜像构建时把 FastWAM 的非 Torch 依赖安装到默认环境即可。
 
 已验证的真实 dataset smoke 输出为：
 
@@ -529,12 +531,13 @@ CPU-first 路径的 cgroup 内存峰值；普通大内存环境仍可关闭该�
 `2.46 s` 也只是一次离线探针。delta 只包含 action expert/proprio 相关状态；推理时必须先加载
 release/base，再覆盖 delta。它不能直接作为 trainer 的单一 `resume`，否则在当前 native
 训练配置下 video expert 会保持随机初始化；续训需要实现 base→delta 双预载，或保存完整
-训练状态。
+训练状态。当前正式入口采用后一种方式：首次运行传 `--checkpoint-mode full`，后续使用
+`--resume-state` 或 `--resume-latest`。
 
 配置化推理入口为：
 
 ```bash
-export FASTWAM_NATIVE_RUN_DIR=/path/to/FastWAM-realrobot/runs/behavior1k_task0_action_only/<run_id>
+export FASTWAM_NATIVE_RUN_DIR=/path/to/EmbodiedAI-Demo-Pipeline/checkpoints/custom/fastwam/behavior1k_task0_action_only/<run_id>
 
 python experiments/custom/fastwam_behavior1k_task0/infer.py --dry-run
 python experiments/custom/fastwam_behavior1k_task0/infer.py
@@ -578,7 +581,7 @@ rollout 数量计算，并支持按 instance 续跑。
    probe 已完成；下一步补固定小样本 overfit/更长 pilot，确认可重复的 loss 趋势。
 3. **已完成：FastWAM 基础后训练与推理链路。** base→delta checkpoint 重载、offline
    inference、server probe 和真实 160-step loss/吞吐验证均已完成；下一步做固定小样本
-   overfit 或 simulator rollout，并实现可恢复的 base→delta 续训语义。
+   overfit 或 simulator rollout，并用真实 GPU 短任务验收 full-state 抢占恢复的空间和耗时。
 4. **受外部环境阻塞：真实 evaluator。** 由用户完成 simulator 环境、资产与许可准备后，
    先跑 π0.5 的单 public instance、10-step smoke，再跑完整单 instance。
 5. **模型对齐评测。** 两条路线都已达到基础训练/推理门槛；simulator 环境就绪后，两个

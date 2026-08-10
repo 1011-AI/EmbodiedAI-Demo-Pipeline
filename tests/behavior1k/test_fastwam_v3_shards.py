@@ -10,12 +10,20 @@ pa = pytest.importorskip("pyarrow")
 pq = pytest.importorskip("pyarrow.parquet")
 
 from experiments.custom.fastwam_behavior1k_task0.run import (
+    _dry_run_dataset_placeholder,
     _expected_text_embedding_path,
     _text_embedding_command,
 )
 from pipelines.custom.fastwam.behavior1k.prepare import discover_task_selection
+from pipelines.custom.fastwam.behavior1k.prepare import (
+    TaskEpisodeSelection,
+    build_dataset_fingerprint,
+    partition_episode_indices,
+    validate_task_norm_stats,
+)
 from pipelines.custom.fastwam.behavior1k.v3_shards import (
     filter_v3_hf_dataset,
+    LazyV3ParquetDataset,
     load_v3_episode_metadata,
     read_v3_episode_table,
     shift_v3_video_timestamps,
@@ -25,6 +33,17 @@ from pipelines.custom.fastwam.behavior1k.v3_shards import (
 
 
 VIDEO_KEY = "observation.rgb.zed_link_camera_0"
+
+
+def test_dry_run_dataset_placeholder_is_not_an_omegaconf_interpolation(
+    tmp_path: Path,
+) -> None:
+    placeholder = _dry_run_dataset_placeholder(tmp_path, "BEHAVIOR1K_DATA_ROOT")
+
+    assert placeholder == str(
+        tmp_path / "data/behavior1k/UNSET_BEHAVIOR1K_DATA_ROOT"
+    )
+    assert "${" not in placeholder
 
 
 def test_task0_text_embedding_cache_name_matches_fastwam_precompute() -> None:
@@ -59,6 +78,24 @@ def test_text_embedding_command_uses_generated_task_config() -> None:
     assert "task=behavior1k_task0_action_only" in command
     assert "model.redirect_common_files=false" in command
     assert "+overwrite=false" in command
+
+
+def test_task0_entry_exposes_stable_runtime_arguments() -> None:
+    source = (
+        Path(__file__).resolve().parents[2]
+        / "experiments/custom/fastwam_behavior1k_task0/run.py"
+    ).read_text(encoding="utf-8")
+
+    assert '"--dataset-root"' in source
+    assert '"--profile"' in source
+    assert '"--run-id"' in source
+    assert '"--checkpoint-mode"' in source
+    assert '"--continuation-mode"' in source
+    assert '"--weights-checkpoint"' in source
+    assert '"--resume-state"' in source
+    assert "args.dataset_root" in source
+    assert 'os.environ["FASTWAM_RUN_ID"] = args.run_id' in source
+    assert 'command.extend(["--profile", args.profile])' in source
 
 
 def _write_real_v3_structure(root: Path) -> list[dict[str, Any]]:
@@ -107,6 +144,10 @@ def _write_real_v3_structure(root: Path) -> list[dict[str, Any]]:
             ]
         )
         + "\n",
+        encoding="utf-8",
+    )
+    (root / "meta/stats.json").write_text(
+        json.dumps({"action": {"mean": [0.0] * 23}}),
         encoding="utf-8",
     )
     rows = [
@@ -212,6 +253,101 @@ def test_real_v3_episode_structure_uses_flattened_refs_and_unique_shards(
     ) == Path(f"videos/{VIDEO_KEY}/chunk-000/file-000.mp4")
 
 
+def test_dataset_fingerprint_binds_metadata_and_episode_selection(
+    tmp_path: Path,
+) -> None:
+    _write_real_v3_structure(tmp_path)
+    selection = discover_task_selection(tmp_path)
+
+    first = build_dataset_fingerprint(tmp_path, selection)
+    second = build_dataset_fingerprint(tmp_path, selection)
+
+    assert first == second
+    assert len(first["sha256"]) == 64
+    assert len(first["selection_sha256"]) == 64
+    assert {item["path"] for item in first["metadata_files"]} == {
+        "meta/info.json",
+        "meta/tasks.jsonl",
+        "meta/stats.json",
+        "meta/episodes/chunk-000/file-000.parquet",
+    }
+
+    (tmp_path / "meta/stats.json").write_text(
+        json.dumps({"action": {"mean": [1.0] * 23}}),
+        encoding="utf-8",
+    )
+    changed = build_dataset_fingerprint(tmp_path, selection)
+    assert changed["sha256"] != first["sha256"]
+    assert changed["selection_sha256"] == first["selection_sha256"]
+
+
+def test_episode_partition_is_deterministic_disjoint_and_seeded() -> None:
+    first = partition_episode_indices(
+        tuple(range(200)),
+        validation_proportion=0.01,
+        seed=42,
+    )
+    same = partition_episode_indices(
+        tuple(reversed(range(200))),
+        validation_proportion=0.01,
+        seed=42,
+    )
+    changed = partition_episode_indices(
+        tuple(range(200)),
+        validation_proportion=0.01,
+        seed=43,
+    )
+
+    assert first == same
+    assert len(first.train_episode_indices) == 198
+    assert len(first.val_episode_indices) == 2
+    assert not set(first.train_episode_indices) & set(first.val_episode_indices)
+    assert first.sha256 == same.sha256
+    assert first.val_episode_indices != changed.val_episode_indices
+
+
+def test_norm_stats_validation_binds_exact_training_split(tmp_path: Path) -> None:
+    selection = TaskEpisodeSelection(
+        task_index=0,
+        task_name="turning_on_radio",
+        task_instruction="Turn on the radio.",
+        episode_indices=(0, 2),
+        data_shards=("data/chunk-000/file-000.parquet",),
+    )
+    vector = [0.0] * 23
+    payload = {
+        "state": {
+            "default": {
+                "global_mean": vector,
+                "global_std": [1.0] * 23,
+                "global_min": vector,
+                "global_max": vector,
+            }
+        },
+        "action": {
+            "default": {
+                "global_mean": vector,
+                "global_std": [1.0] * 23,
+                "global_min": vector,
+                "global_max": vector,
+            }
+        },
+        "num_episodes": 2,
+        "provenance": {
+            "episode_indices": [0, 2],
+            "action_semantics": "raw mixed 23D; no global delta transform",
+        },
+    }
+    path = tmp_path / "stats.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    assert validate_task_norm_stats(path, selection) == payload
+    payload["provenance"]["episode_indices"] = [0, 1]
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(Exception, match="episode ids"):
+        validate_task_norm_stats(path, selection)
+
+
 def test_shared_v3_parquet_is_filtered_to_exact_selected_episode_rows(
     tmp_path: Path,
 ) -> None:
@@ -264,3 +400,81 @@ def test_direct_episode_read_and_video_timestamp_shift_do_not_leak_neighbors(
     assert table["episode_index"].to_pylist() == [1, 1, 1]
     assert table["value"].to_pylist() == [2, 3, 4]
     assert shifted == pytest.approx([2 / 30, 3 / 30, 4 / 30])
+
+
+def test_lazy_v3_dataset_maps_selected_local_indices_and_reuses_shared_shard(
+    tmp_path: Path,
+) -> None:
+    metadata_rows = _write_real_v3_structure(tmp_path)
+    metadata = {int(row["episode_index"]): row for row in metadata_rows}
+    data_path = tmp_path / "data/chunk-000/file-000.parquet"
+    data_path.parent.mkdir(parents=True)
+    pq.write_table(
+        pa.table(
+            {
+                "episode_index": [0, 0, 1, 1, 1, 2],
+                "task_index": [0, 0, 1, 1, 1, 0],
+                "timestamp": [0.0, 1 / 30, 0.0, 1 / 30, 2 / 30, 0.0],
+                "value": [0, 1, 2, 3, 4, 5],
+            }
+        ),
+        data_path,
+    )
+    info = json.loads((tmp_path / "meta/info.json").read_text())
+    info["features"] = {
+        "episode_index": {"dtype": "int64"},
+        "task_index": {"dtype": "int64"},
+        "timestamp": {"dtype": "float32"},
+        "value": {"dtype": "int64"},
+        VIDEO_KEY: {"dtype": "video"},
+    }
+    dataset = LazyV3ParquetDataset(
+        root=tmp_path,
+        info=info,
+        selected_episodes=[2, 0],
+        episode_metadata=metadata,
+        cache_size=1,
+    )
+
+    assert len(dataset) == 3
+    assert dataset[0]["episode_index"].item() == 2
+    assert dataset[0]["value"].item() == 5
+    batch = dataset.select([1, 2])["value"]
+    assert [value.item() for value in batch] == [0, 1]
+    assert dataset.cache_misses == 1
+    assert dataset.cache_hits > 0
+
+
+def test_lazy_v3_dataset_rejects_neighbor_row_mapping(tmp_path: Path) -> None:
+    metadata_rows = _write_real_v3_structure(tmp_path)
+    metadata = {int(row["episode_index"]): row for row in metadata_rows}
+    data_path = tmp_path / "data/chunk-000/file-000.parquet"
+    data_path.parent.mkdir(parents=True)
+    # Same row count, deliberately wrong episode layout.
+    pq.write_table(
+        pa.table(
+            {
+                "episode_index": [1, 0, 1, 1, 1, 2],
+                "task_index": [0, 0, 1, 1, 1, 0],
+                "timestamp": [0.0] * 6,
+            }
+        ),
+        data_path,
+    )
+    info = json.loads((tmp_path / "meta/info.json").read_text())
+    info["features"] = {
+        "episode_index": {"dtype": "int64"},
+        "task_index": {"dtype": "int64"},
+        "timestamp": {"dtype": "float32"},
+        VIDEO_KEY: {"dtype": "video"},
+    }
+    dataset = LazyV3ParquetDataset(
+        root=tmp_path,
+        info=info,
+        selected_episodes=[0],
+        episode_metadata=metadata,
+        cache_size=1,
+    )
+
+    with pytest.raises(ValueError, match="leaked episode rows"):
+        dataset[0]

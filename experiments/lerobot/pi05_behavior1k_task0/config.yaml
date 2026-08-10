@@ -38,6 +38,9 @@ dataset:
   repo_id: behavior-1k/2026-challenge-demos
   video_backend: pyav
   eval_split: 0.0
+  # OpenPI 的 BEHAVIOR-1K loader 使用 5e-4 秒。30 FPS 时间戳写入 Parquet
+  # 后存在约 1e-4 秒的浮点舍入误差；LeRobot 默认 1e-4 会误报不同步。
+  tolerance_s: 0.0005
 
 policy:
   type: pi05
@@ -91,8 +94,10 @@ profiles:
     policy:
       gradient_checkpointing: false
     training:
-      # 已验证吞吐起点：每 GPU batch=8，8 进程全局 batch=64。
-      batch_size: 8
+      # 8×A800 的实测安全甜点：每 GPU batch=16，全局 batch=128。
+      # batch=20 虽可达到约 126 samples/s，但设备占用接近 80.7/81.9 GB，
+      # 不保留长训所需的显存余量。
+      batch_size: 16
       num_workers: 4
       persistent_workers: true
     distributed:
