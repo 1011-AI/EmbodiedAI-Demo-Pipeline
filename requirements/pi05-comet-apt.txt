@@ -1,0 +1,7 @@
+# Exact Ubuntu packages installed in the image on 2026-08-08.
+# The Baige runtime must additionally expose /dev/infiniband/rdma_cm and uverbs*.
+rdma-core=50.0-2ubuntu0.2
+libibverbs1=50.0-2ubuntu0.2
+ibverbs-providers=50.0-2ubuntu0.2
+librdmacm1t64=50.0-2ubuntu0.2
+ibverbs-utils=50.0-2ubuntu0.2

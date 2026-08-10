@@ -1,0 +1,798 @@
+from __future__ import annotations
+
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+from types import SimpleNamespace
+
+import numpy as np
+import pytest
+
+from embodied_demo.behavior1k.r1pro import RGB_VIDEO_KEYS
+from pipelines.custom.fastwam.behavior1k.adapter import FastWAMBehaviorContractError
+from pipelines.custom.fastwam.behavior1k.inference import (
+    FastWAMBehaviorPolicy,
+    _raw_state_array,
+    _rgb_uint8_chw,
+    extract_evaluator_observation,
+    resolve_checkpoint,
+    resolve_dataset_task_spec,
+    resolve_inference_paths,
+    resolve_native_run_dir,
+    validate_model_load_reports,
+)
+
+
+ROOT = Path(__file__).resolve().parents[2]
+
+
+def _native_run(root: Path) -> Path:
+    native = root / "native"
+    (native / "checkpoints/weights").mkdir(parents=True)
+    (native / "config.yaml").write_text("mixed_precision: bf16\n", encoding="utf-8")
+    (native / "dataset_stats.json").write_text("{}\n", encoding="utf-8")
+    return native
+
+
+def _source_root(root: Path) -> Path:
+    source = root / "FastWAM-realrobot"
+    files = {
+        "src/fastwam/datasets/lerobot/base_lerobot_dataset.py": "\n".join(
+            [
+                'meta["lerobot_key"] = meta.get("lerobot_key")',
+                "episode_indices: Optional[List[int]] = None",
+                "image_sample_stride: int = 1",
+                "                    image_sample_stride,",
+            ]
+        ),
+        "src/fastwam/datasets/lerobot/robot_video_dataset.py": "\n".join(
+            [
+                "episode_indices: Optional[List[int]] = None",
+                "episode_indices=episode_indices",
+                "sparse_video_decode: bool = False",
+                "image_sample_stride=(",
+                "    action_video_freq_ratio if sparse_video_decode else 1",
+                ")",
+                'if self.concat_multi_camera == "robotwin":',
+                '    raise ValueError("requires exactly 3 cameras")',
+            ]
+        ),
+        "src/fastwam/datasets/lerobot/processors/fastwam_processor.py": "\n".join(
+            [
+                "num_image_steps: Optional[int] = None",
+                "meta_shape = [self.num_image_steps] + shape",
+            ]
+        ),
+        "src/fastwam/datasets/lerobot/lerobot/lerobot_dataset.py": "\n".join(
+            [
+                "load_v3_episode_metadata",
+                "filter_v3_hf_dataset",
+                "read_v3_episode_table",
+                "shift_v3_video_timestamps",
+                "v3_data_file_path",
+                "v3_video_file_path",
+                "video_keys = self.meta.video_keys",
+                "video_keys = [key for key in self.meta.video_keys if key in query_indices]",
+            ]
+        ),
+        "src/fastwam/datasets/lerobot/lerobot/behavior1k_v3_shards.py": (
+            "# test v3 shared-shard helper\n"
+        ),
+        "src/fastwam/datasets/lerobot/utils/normalizer.py": "\n".join(
+            [
+                "class SingleFieldLinearNormalizer:",
+                "    def __init__(self):",
+                "        self.constant_mask = None",
+                "    def inverse(self, x):",
+                '        if self.mode == "min/max":',
+                "            return torch.where(self.constant_mask, self.constant_value, x)",
+            ]
+        ),
+        "src/fastwam/models/wan22/helpers/loader.py": "\n".join(
+            [
+                'FASTWAM_DIRECT_CUDA_LOAD_ENV = "FASTWAM_DIRECT_CUDA_LOAD"',
+                "with _direct_model_init(device, torch_dtype):",
+                "    model = model_class()",
+            ]
+        ),
+        "src/fastwam/models/wan22/action_dit.py": "\n".join(
+            [
+                'FASTWAM_DIRECT_CUDA_LOAD_ENV = "FASTWAM_DIRECT_CUDA_LOAD"',
+                "with _direct_model_init(device, torch_dtype):",
+                "    action_expert = cls()",
+            ]
+        ),
+        "src/fastwam/models/wan22/fastwam.py": "\n".join(
+            [
+                "def _filter_shape_compatible():",
+                '    logger.warning("Skipping %d shape-mismatched")',
+                "    load_state_dict({}, strict=False)",
+                "from fastwam.utils.behavior1k_checkpoint_report import (",
+                "    write_fastwam_load_report_from_environment,",
+                ")",
+                'FASTWAM_DIRECT_CUDA_LOAD_ENV = "FASTWAM_DIRECT_CUDA_LOAD"',
+                "mmap=direct_cuda",
+                'FASTWAM_LOW_MEMORY_CHECKPOINT_ENV = "FASTWAM_LOW_MEMORY_CHECKPOINT"',
+                'checkpoint_scope = "action_delta"',
+            ]
+        ),
+        "src/fastwam/utils/behavior1k_checkpoint_report.py": (
+            "def write_fastwam_load_report_from_environment(): pass\n"
+        ),
+        "src/fastwam/trainer.py": (
+            "train_action_expert_only = True\n"
+            "FASTWAM_LOW_MEMORY_CHECKPOINT\n"
+        ),
+    }
+    for relative, text in files.items():
+        path = source / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+    return source
+
+
+def test_native_run_and_checkpoint_resolution_uses_native_pointer_and_numeric_step(
+    tmp_path: Path,
+) -> None:
+    native = _native_run(tmp_path)
+    step9 = native / "checkpoints/weights/step_000009.pt"
+    step100 = native / "checkpoints/weights/step_000100.pt"
+    step9.touch()
+    step100.touch()
+    wrapper = tmp_path / "wrapper"
+    wrapper.mkdir()
+    (wrapper / "fastwam_native_output_dir.txt").write_text(
+        str(native),
+        encoding="utf-8",
+    )
+
+    assert resolve_native_run_dir(wrapper) == native.resolve()
+    assert resolve_checkpoint(native, None) == step100.resolve()
+    assert resolve_checkpoint(native, "checkpoints/weights/step_000009.pt") == step9.resolve()
+
+
+def test_model_load_reports_require_full_video_base_and_complete_delta(
+    tmp_path: Path,
+) -> None:
+    base = tmp_path / "base.json"
+    trained = tmp_path / "trained.json"
+    base.write_text(
+        json.dumps(
+            {
+                "checkpoint_scope": "full",
+                "loaded_keys": ["mot.mixtures.video.blocks.0.weight"],
+                "missing_checkpoint_keys": [],
+                "skipped_shape_mismatch": [
+                    {"key": "mot.mixtures.action.head.weight"}
+                ],
+                "summary": {
+                    "loaded": 1647,
+                    "shape_mismatch": 4,
+                    "missing_checkpoint": 0,
+                    "reinitialized": 4,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    trained.write_text(
+        json.dumps(
+            {
+                "checkpoint_scope": "action_delta",
+                "loaded_keys": ["mot.mixtures.action.head.weight"],
+                "missing_checkpoint_keys": [],
+                "skipped_shape_mismatch": [],
+                "summary": {
+                    "loaded": 826,
+                    "shape_mismatch": 0,
+                    "unexpected_checkpoint": 0,
+                    "missing_checkpoint": 0,
+                    "reinitialized": 0,
+                    "inherited_from_base": 825,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = validate_model_load_reports(base, trained)
+    assert result["load_status"] == "success"
+    assert result["trained"]["checkpoint_scope"] == "action_delta"
+
+    broken = json.loads(base.read_text(encoding="utf-8"))
+    broken["checkpoint_scope"] = "action_delta"
+    base.write_text(json.dumps(broken), encoding="utf-8")
+    with pytest.raises(FastWAMBehaviorContractError, match="must be a full"):
+        validate_model_load_reports(base, trained)
+
+
+def test_model_load_reports_reject_missing_video_or_incomplete_trained_weights(
+    tmp_path: Path,
+) -> None:
+    base = tmp_path / "base.json"
+    trained = tmp_path / "trained.json"
+    base.write_text(
+        json.dumps(
+            {
+                "checkpoint_scope": "full",
+                "loaded_keys": ["mot.mixtures.video.blocks.0.weight"],
+                "missing_checkpoint_keys": [
+                    "mot.mixtures.video.blocks.1.weight"
+                ],
+                "skipped_shape_mismatch": [],
+                "summary": {"loaded": 1},
+            }
+        ),
+        encoding="utf-8",
+    )
+    trained.write_text(
+        json.dumps(
+            {
+                "checkpoint_scope": "action_delta",
+                "loaded_keys": ["mot.mixtures.action.head.weight"],
+                "missing_checkpoint_keys": [],
+                "skipped_shape_mismatch": [],
+                "summary": {
+                    "loaded": 1,
+                    "shape_mismatch": 0,
+                    "unexpected_checkpoint": 0,
+                    "missing_checkpoint": 0,
+                    "reinitialized": 0,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(
+        FastWAMBehaviorContractError,
+        match="leaves video-expert weights uninitialized",
+    ):
+        validate_model_load_reports(base, trained)
+
+    base_payload = json.loads(base.read_text(encoding="utf-8"))
+    base_payload["missing_checkpoint_keys"] = []
+    base.write_text(json.dumps(base_payload), encoding="utf-8")
+    trained_payload = json.loads(trained.read_text(encoding="utf-8"))
+    trained_payload["summary"]["shape_mismatch"] = 1
+    trained.write_text(json.dumps(trained_payload), encoding="utf-8")
+    with pytest.raises(FastWAMBehaviorContractError, match="is incomplete"):
+        validate_model_load_reports(base, trained)
+
+
+def test_task_spec_uses_exact_dataset_instruction_not_slug(tmp_path: Path) -> None:
+    root = tmp_path / "dataset"
+    (root / "meta").mkdir(parents=True)
+    instruction = "Turn on the radio receiver that's on the table in the living room."
+    (root / "meta/tasks.jsonl").write_text(
+        json.dumps(
+            {
+                "task_index": 0,
+                "task_name": "turning_on_radio",
+                "task": instruction,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    task = resolve_dataset_task_spec(
+        dataset_roots=[root],
+        task_index=0,
+        task_name="turning_on_radio",
+        expected_instruction=instruction,
+    )
+
+    assert task.instruction == instruction
+    with pytest.raises(FastWAMBehaviorContractError, match="instruction mismatch"):
+        resolve_dataset_task_spec(
+            dataset_roots=[root],
+            task_index=0,
+            task_name="turning_on_radio",
+            expected_instruction="turning_on_radio",
+        )
+
+
+def test_resolved_inference_paths_require_config_stats_source_and_checkpoint(
+    tmp_path: Path,
+) -> None:
+    native = _native_run(tmp_path)
+    checkpoint = native / "checkpoints/weights/step_000001.pt"
+    checkpoint.touch()
+    base_checkpoint = tmp_path / "release.pt"
+    base_checkpoint.touch()
+    source = _source_root(tmp_path)
+
+    paths = resolve_inference_paths(
+        native_run_dir=native,
+        source_root=source,
+        base_checkpoint=base_checkpoint,
+    )
+
+    assert paths.native_run_dir == str(native.resolve())
+    assert paths.base_checkpoint == str(base_checkpoint.resolve())
+    assert paths.checkpoint == str(checkpoint.resolve())
+    assert paths.source_root == str(source.resolve())
+    (native / "dataset_stats.json").unlink()
+    with pytest.raises(FastWAMBehaviorContractError, match="incomplete"):
+        resolve_inference_paths(
+            native_run_dir=native,
+            source_root=source,
+            base_checkpoint=base_checkpoint,
+        )
+
+
+def test_evaluator_observation_accepts_official_flat_keys_and_canonical_keys() -> None:
+    state = np.arange(61, dtype=np.float32)
+    images = {
+        "head": np.zeros((720, 720, 4), dtype=np.uint8),
+        "left": np.zeros((480, 480, 4), dtype=np.uint8),
+        "right": np.zeros((480, 480, 4), dtype=np.uint8),
+    }
+    official = {
+        "robot_r1::proprio": state,
+        "robot_r1::robot_r1:zed_link:Camera:0::rgb": images["head"],
+        "robot_r1::robot_r1:left_realsense_link:Camera:0::rgb": images["left"],
+        "robot_r1::robot_r1:right_realsense_link:Camera:0::rgb": images["right"],
+    }
+
+    actual_state, actual_images = extract_evaluator_observation(official)
+
+    assert actual_state is state
+    assert tuple(actual_images) == ("head", "left_wrist", "right_wrist")
+    assert actual_images["head"] is images["head"]
+
+    canonical = {
+        "observation.state": state,
+        **{
+            key: image
+            for key, image in zip(
+                RGB_VIDEO_KEYS,
+                (images["head"], images["left"], images["right"]),
+            )
+        },
+    }
+    _, canonical_images = extract_evaluator_observation(canonical)
+    assert canonical_images["right_wrist"] is images["right"]
+
+
+def test_evaluator_observation_rejects_missing_or_ambiguous_camera() -> None:
+    state = np.zeros(61, dtype=np.float32)
+    base = {
+        "robot_r1::proprio": state,
+        "robot_r1::robot_r1:zed_link:Camera:0::rgb": np.zeros(
+            (2, 2, 3),
+            dtype=np.uint8,
+        ),
+        "robot_r1::robot_r1:left_realsense_link:Camera:0::rgb": np.zeros(
+            (2, 2, 3),
+            dtype=np.uint8,
+        ),
+    }
+    with pytest.raises(FastWAMBehaviorContractError, match="right_wrist"):
+        extract_evaluator_observation(base)
+
+    base["robot_r1::robot_r1:right_realsense_link:Camera:0::rgb"] = np.zeros(
+        (2, 2, 3),
+        dtype=np.uint8,
+    )
+    base["other::right_realsense_link:Camera:0::rgb"] = np.zeros(
+        (2, 2, 3),
+        dtype=np.uint8,
+    )
+    with pytest.raises(FastWAMBehaviorContractError, match="ambiguous"):
+        extract_evaluator_observation(base)
+
+
+def test_protocol_arrays_become_writable_contiguous_processor_inputs() -> None:
+    read_only_state = np.frombuffer(
+        np.arange(61, dtype=np.float32).tobytes(),
+        dtype=np.float32,
+    )
+    read_only_image = np.frombuffer(
+        np.arange(3 * 4 * 5, dtype=np.uint8).tobytes(),
+        dtype=np.uint8,
+    ).reshape(3, 4, 5)
+
+    state = _raw_state_array(read_only_state, np)
+    image = _rgb_uint8_chw(read_only_image, np)
+
+    assert state.flags.writeable and state.flags.c_contiguous
+    assert image.flags.writeable and image.flags.c_contiguous
+    assert state.shape == (61,) and state.dtype == np.float32
+    assert image.shape == (3, 4, 5) and image.dtype == np.uint8
+
+
+@pytest.mark.parametrize(
+    ("num_image_steps", "expected_image_steps"),
+    [(None, 33), (9, 9)],
+)
+def test_evaluator_preprocess_separates_state_and_image_horizons(
+    num_image_steps: int | None,
+    expected_image_steps: int,
+) -> None:
+    class Tensor:
+        def __init__(self, shape) -> None:
+            self.shape = tuple(int(value) for value in shape)
+
+        def unsqueeze(self, dim: int):
+            dim = dim if dim >= 0 else len(self.shape) + dim + 1
+            shape = list(self.shape)
+            shape.insert(dim, 1)
+            return Tensor(shape)
+
+        def repeat(self, *repeats: int):
+            assert len(repeats) == len(self.shape)
+            return Tensor(
+                size * multiplier
+                for size, multiplier in zip(self.shape, repeats)
+            )
+
+        def __getitem__(self, item):
+            assert isinstance(item, int)
+            return Tensor(self.shape[1:])
+
+        def permute(self, *dims: int):
+            return Tensor(self.shape[index] for index in dims)
+
+        def clone(self):
+            return Tensor(self.shape)
+
+    class Torch:
+        bool = "bool"
+
+        @staticmethod
+        def from_numpy(value):
+            return Tensor(value.shape)
+
+        @staticmethod
+        def zeros(*shape, **_kwargs):
+            return Tensor(shape)
+
+        @staticmethod
+        def cat(values, dim: int):
+            shape = list(values[0].shape)
+            dim = dim if dim >= 0 else len(shape) + dim
+            shape[dim] = sum(value.shape[dim] for value in values)
+            return Tensor(shape)
+
+    class Processor:
+        num_obs_steps = 33
+
+        def __init__(self) -> None:
+            if num_image_steps is not None:
+                self.num_image_steps = num_image_steps
+            self.received = None
+
+        def preprocess(self, batch):
+            self.received = batch
+            assert batch["state"]["default"].shape == (33, 61)
+            assert batch["state_is_pad"].shape == (33,)
+            assert batch["image_is_pad"].shape == (expected_image_steps,)
+            assert all(
+                image.shape[0] == expected_image_steps
+                for image in batch["images"].values()
+            )
+            return {
+                "pixel_values": Tensor((3, expected_image_steps, 3, 224, 224)),
+                "proprio": Tensor((33, 23)),
+            }
+
+    class TransformsF:
+        InterpolationMode = SimpleNamespace(BILINEAR="bilinear")
+
+        @staticmethod
+        def resize(value, *, size, **_kwargs):
+            return Tensor((*value.shape[:-2], *size))
+
+    identity = lambda value: value
+    policy = object.__new__(FastWAMBehaviorPolicy)
+    policy._np = np
+    policy._torch = Torch()
+    policy.processor = Processor()
+    policy._transforms_f = TransformsF()
+    policy.dataset = SimpleNamespace(
+        resize_transform=identity,
+        crop_transform=identity,
+        normalize_transform=identity,
+    )
+    policy._task_context = Tensor((128, 4096))
+    policy._task_context_mask = Tensor((128,))
+    policy.task_instruction = "Turn on the radio."
+    observation = {
+        "observation.state": np.zeros(61, dtype=np.float32),
+        **{
+            key: np.zeros((8, 10, 3), dtype=np.uint8)
+            for key in RGB_VIDEO_KEYS
+        },
+    }
+
+    sample = policy._preprocess_evaluator_observation(observation)
+
+    assert sample["video"].shape == (3, expected_image_steps, 384, 320)
+    assert sample["proprio"].shape == (33, 23)
+
+
+def test_denormalization_preserves_full_23d_chunk_shape() -> None:
+    class Tensor:
+        def __init__(self, values) -> None:
+            self.values = np.asarray(values, dtype=np.float32)
+
+        @property
+        def ndim(self) -> int:
+            return self.values.ndim
+
+        @property
+        def shape(self):
+            return self.values.shape
+
+        def detach(self):
+            return self
+
+        def cpu(self):
+            return self
+
+        def numpy(self):
+            return self.values
+
+        def to(self, **_kwargs):
+            return self
+
+        def unsqueeze(self, dim: int):
+            return Tensor(np.expand_dims(self.values, axis=dim))
+
+        def clamp(self, *, min: float, max: float):
+            return Tensor(np.clip(self.values, min, max))
+
+        def __getitem__(self, item):
+            return Tensor(self.values[item])
+
+    class Torch:
+        float32 = np.float32
+
+    class Merger:
+        def backward(self, batch):
+            assert tuple(batch["action"].shape) == (1, 32, 23)
+            assert tuple(batch["state"].shape) == (1, 1, 23)
+            batch["action"] = {"default": batch["action"]}
+            batch["state"] = {"default": batch["state"]}
+            return batch
+
+    class Normalizer:
+        def backward(self, batch):
+            batch["action"]["default"] = Tensor(
+                batch["action"]["default"].values + 2.0
+            )
+            return batch
+
+    class Processor:
+        action_state_merger = Merger()
+        normalizer = Normalizer()
+        action_state_transforms = None
+
+    policy = object.__new__(FastWAMBehaviorPolicy)
+    policy._torch = Torch()
+    policy.processor = Processor()
+    policy.normalized_action_clip = 5.0
+    actions = policy._denormalize_actions(
+        Tensor(np.zeros((32, 23), dtype=np.float32)),
+        Tensor(np.zeros((32, 23), dtype=np.float32)),
+    )
+
+    assert actions.shape == (32, 23)
+    assert actions.dtype == np.float32
+    assert actions.flags.c_contiguous
+    np.testing.assert_array_equal(actions, np.full((32, 23), 2.0, dtype=np.float32))
+
+
+def test_denormalization_clips_to_training_normalized_support() -> None:
+    class Tensor:
+        def __init__(self, values) -> None:
+            self.values = np.asarray(values, dtype=np.float32)
+
+        @property
+        def ndim(self) -> int:
+            return self.values.ndim
+
+        @property
+        def shape(self):
+            return self.values.shape
+
+        def detach(self):
+            return self
+
+        def cpu(self):
+            return self
+
+        def numpy(self):
+            return self.values
+
+        def to(self, **_kwargs):
+            return self
+
+        def unsqueeze(self, dim: int):
+            return Tensor(np.expand_dims(self.values, axis=dim))
+
+        def clamp(self, *, min: float, max: float):
+            return Tensor(np.clip(self.values, min, max))
+
+        def __getitem__(self, item):
+            return Tensor(self.values[item])
+
+    class Torch:
+        float32 = np.float32
+
+    class Merger:
+        def backward(self, batch):
+            batch["action"] = {"default": batch["action"]}
+            batch["state"] = {"default": batch["state"]}
+            return batch
+
+    class Normalizer:
+        def backward(self, batch):
+            return batch
+
+    class Processor:
+        action_state_merger = Merger()
+        normalizer = Normalizer()
+        action_state_transforms = None
+
+    policy = object.__new__(FastWAMBehaviorPolicy)
+    policy._torch = Torch()
+    policy.processor = Processor()
+    policy.normalized_action_clip = 5.0
+    raw = np.zeros((32, 23), dtype=np.float32)
+    raw[0, 0] = -100.0
+    raw[0, 1] = 100.0
+
+    actions = policy._denormalize_actions(
+        Tensor(raw),
+        Tensor(np.zeros((32, 23), dtype=np.float32)),
+    )
+
+    assert actions[0, 0] == -5.0
+    assert actions[0, 1] == 5.0
+
+
+def test_fastwam_product_path_calls_real_upstream_model_processor_and_server() -> None:
+    inference_source = (
+        ROOT / "pipelines/custom/fastwam/behavior1k/inference.py"
+    ).read_text(encoding="utf-8")
+    entry_source = (
+        ROOT / "experiments/custom/fastwam_behavior1k_task0/infer.py"
+    ).read_text(encoding="utf-8")
+
+    assert "self.model = instantiate(cfg.model" in inference_source
+    assert "self.model.load_checkpoint(paths.base_checkpoint)" in inference_source
+    assert "self.model.load_checkpoint(paths.checkpoint)" in inference_source
+    assert "base_model_load_report.json" in inference_source
+    assert "delta_model_load_report.json" in inference_source
+    assert "self.dataset = instantiate(cfg.data.train)" in inference_source
+    assert "self.model.infer_action(" in inference_source
+    assert "self.processor.action_state_merger.backward" in inference_source
+    assert "self.processor.normalizer.backward" in inference_source
+    assert "self.dataset._get_cached_text_context(" in inference_source
+    assert "resolve_dataset_task_spec(" in inference_source
+    assert "self.processor.preprocess(" in inference_source
+    assert "validate_action_chunk(action, action_dim=ACTION_DIM)" in inference_source
+    assert "toy" not in entry_source.lower()
+    assert "mock" not in entry_source.lower()
+    assert "BehaviorWebSocketPolicyServer" in entry_source
+
+
+def test_fastwam_inference_yaml_dry_run_checks_real_artifact_layout(
+    tmp_path: Path,
+) -> None:
+    native = _native_run(tmp_path)
+    (native / "checkpoints/weights/step_000007.pt").touch()
+    source = _source_root(tmp_path)
+    overlay_site = (
+        tmp_path
+        / ".venv_fastwam"
+        / f"lib/python{sys.version_info.major}.{sys.version_info.minor}/site-packages"
+    )
+    overlay_site.mkdir(parents=True)
+    config = tmp_path / "inference.yaml"
+    config.write_text(
+        "\n".join(
+            [
+                "backend: fastwam",
+                "task_index: 0",
+                "task_name: turning_on_radio",
+                "task_instruction: Turn on the radio receiver that's on the table in the living room.",
+                "paths:",
+                f"  native_run_dir: {native}",
+                "  native_run_dir_env: TEST_FASTWAM_NATIVE_RUN_DIR",
+                "  checkpoint:",
+                "  checkpoint_env: TEST_FASTWAM_CHECKPOINT",
+                f"  base_checkpoint: {native / 'base.pt'}",
+                "  base_checkpoint_env: TEST_FASTWAM_BASE_CHECKPOINT",
+                f"  source_root: {source}",
+                "  source_root_env: TEST_FASTWAM_SOURCE_ROOT",
+                f"  python_overlay: {tmp_path / '.venv_fastwam'}",
+                "  python_overlay_env: TEST_FASTWAM_PYTHON_OVERLAY",
+                f"  output_dir: {tmp_path / 'output'}",
+                "inference:",
+                "  mode: offline",
+                "  sample_index: 4",
+                "  device: cuda:0",
+                "  require_cuda: true",
+                "  direct_cuda_load: true",
+                "  action_horizon: 32",
+                "  num_inference_steps: 20",
+                "  normalized_action_clip: 5.0",
+                "  seed: 42",
+                "server:",
+                "  host: 0.0.0.0",
+                "  port: 8000",
+                "  execution_horizon: 16",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (native / "base.pt").touch()
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(ROOT / "experiments/custom/fastwam_behavior1k_task0/infer.py"),
+            "--config",
+            str(config),
+            "--dry-run",
+        ],
+        cwd=ROOT,
+        env={
+            key: value
+            for key, value in os.environ.items()
+            if key
+            not in {
+                "DIFFSYNTH_MODEL_BASE_PATH",
+                "DIFFSYNTH_SKIP_DOWNLOAD",
+                "TEST_FASTWAM_NATIVE_RUN_DIR",
+                "TEST_FASTWAM_CHECKPOINT",
+                "TEST_FASTWAM_BASE_CHECKPOINT",
+                "TEST_FASTWAM_SOURCE_ROOT",
+                "TEST_FASTWAM_PYTHON_OVERLAY",
+            }
+        },
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+
+    assert "BEHAVIOR1K_FASTWAM_INFERENCE_RESOLVED" in result.stdout
+    assert "BEHAVIOR1K_FASTWAM_INFERENCE_DRY_RUN_OK" in result.stdout
+    assert '"action_horizon": 32' in result.stdout
+    assert '"direct_cuda_load": true' in result.stdout
+    assert '"normalized_action_clip": 5.0' in result.stdout
+    assert '"execution_horizon": 16' in result.stdout
+    expected_model_base = ROOT / "models"
+    assert f'"diffsynth_model_base_path": "{expected_model_base}"' in result.stdout
+    assert '"diffsynth_skip_download": "true"' in result.stdout
+    assert f'"python_overlay_site_packages": "{overlay_site}"' in result.stdout
+    assert (
+        "\"task_instruction\": \"Turn on the radio receiver that's on the "
+        "table in the living room.\"" in result.stdout
+    )
+    assert "gpu_model_loaded=false checkpoint_executed=false" in result.stdout
+    assert not (tmp_path / "output").exists()
+
+
+def test_inference_yaml_documents_chunk_and_reset_contract() -> None:
+    text = (
+        ROOT / "experiments/custom/fastwam_behavior1k_task0/inference.yaml"
+    ).read_text(encoding="utf-8")
+
+    assert "action_horizon: 32" in text
+    assert "direct_cuda_load: true" in text
+    assert "normalized_action_clip: 5.0" in text
+    assert "execution_horizon: 16" in text
+    assert "task_index: 0" in text
+    assert (
+        "Turn on the radio receiver that's on the table in the living room."
+        in text
+    )
+    assert '{"reset": true}' in text
+    assert "float32[23]" in text

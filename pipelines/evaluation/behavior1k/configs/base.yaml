@@ -1,0 +1,45 @@
+schema_version: "1.0"
+
+behavior:
+  # 集群绝对路径不要写进公共 YAML；BEHAVIOR1K_REPO_ROOT 会覆盖此默认值。
+  checkout: upstreams/BEHAVIOR-1K
+  checkout_env: BEHAVIOR1K_REPO_ROOT
+
+  # 推荐显式设置 BEHAVIOR1K_PYTHON，指向由 BEHAVIOR-1K 官方 setup 创建的解释器。
+  python: python
+  python_env: BEHAVIOR1K_PYTHON
+
+  # 2026 数据与 evaluator 只允许使用该版本。runner 会同时校验 tag 和完整 commit。
+  required_tag: v3.9.1
+  required_commit: 26f2c7ef7b9cf96bd0414f81e1e751e493762779
+  evaluator_module: omnigibson.eval.eval
+  require_clean_checkout: true
+
+policy:
+  # evaluator 只连接服务，不负责拉起 π0.5 / FastWAM。URL 必须包含显式端口。
+  url: ws://127.0.0.1:8000
+  require_healthz: true
+  healthz_timeout_seconds: 120
+
+evaluation:
+  task_name: turning_on_radio
+  mode: public_test
+  instance_indices: [0]
+  num_rollouts: 1
+
+  # null 使用官方“1.5 倍人类演示长度”；smoke 配置会覆盖成 10。
+  max_steps: null
+  env_wrapper: omnigibson.eval.wrappers.RGBDFullResWrapper
+
+  # null 使用 BEHAVIOR v3.9.1 自带的 OmniGibson/omnigibson/eval/r1pro.yaml。
+  # 模型若需要专用 robot config，应通过 BEHAVIOR1K_ROBOT_CONFIG 指向外部配置。
+  robot_config: null
+  robot_config_env: BEHAVIOR1K_ROBOT_CONFIG
+  headless: true
+  write_video: true
+  video_fps: 30
+
+output:
+  directory: runs/experiments/evaluation/behavior1k/turning_on_radio
+  resume: true
+

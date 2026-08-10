@@ -1,0 +1,247 @@
+# FastWAM / BEHAVIOR-1K 2026 / 100-task joint post-training.
+#
+# Six-node production command (the platform injects MASTER_ADDR/PORT,
+# RANK/WORLD_SIZE and NPROC_PER_NODE):
+#   python experiments/custom/fastwam_behavior1k_all/run.py --baige --profile full --run-id b1k-all-full-v1
+
+backend: fastwam
+base_config: configs/fastwam/realrobot_train_eval.sh
+
+experiment:
+  name: fastwam_behavior1k_all
+  route: custom
+  run_name: fastwam_behavior1k_all_joint
+  run_id:
+
+environment:
+  offline: true
+
+paths:
+  run_root: runs/experiments/custom
+  checkpoint_root: checkpoints/custom/fastwam
+  fastwam_workdir: upstreams/FastWAM-realrobot
+  model_base: models
+  cache_root: upstreams
+  cache_paths:
+    torch_extensions: .cache/torch_extensions/fastwam
+    # DeepSpeed inspects this before the rank-local override in train.py; keep
+    # even the launcher-time Triton cache off CFS/NFS to avoid exit stalls.
+    triton: /tmp/fastwam-triton
+    xdg: .cache
+    hf_datasets: .cache/huggingface/datasets_fastwam
+
+behavior1k:
+  scope: all_tasks
+  dataset_root_env: BEHAVIOR1K_DATA_ROOT
+  preferred_dataset_root: /mnt/cfs/data_file_0/datasets/2026-challenge-demos
+  default_dataset_root: /mnt/bos/bos_0/datasets/2026-challenge-demos
+  # Never spend a multi-node allocation on the known-slow BOS fallback.
+  # Local preparation and dry-run may still inspect BOS while staging runs.
+  require_preferred_dataset_for_baige: true
+  expected_tasks: 100
+  expected_episodes: 20000
+  validation:
+    proportion: 0.01
+    seed: 42
+  norm_stats_path: data/custom/fastwam/behavior1k/all_tasks_train19800_seed42_norm_stats.json
+  normalization_audit_path: data/custom/fastwam/behavior1k/all_tasks_train19800_seed42_distribution_audit.json
+  normalization:
+    # Cross-task z-score collapses legitimate minority joint modes at the
+    # hard +/-5 clamp. One shared physical-range affine remains invertible
+    # across all scenes/tasks without introducing task-specific coordinates.
+    mode: min/max
+  sampling_manifest_path: data/custom/fastwam/behavior1k/all_tasks_train19800_seed42_sampling.json
+  eval_sampling_manifest_path: data/custom/fastwam/behavior1k/all_tasks_val200_seed42_sampling.json
+  text_embedding_cache_dir: data/custom/fastwam/behavior1k/text_embeds/all_tasks
+  # Per DataLoader worker.  One task normally occupies 2-3 shared Parquet
+  # shards, so three avoids repeated 78 MiB shard reads without unbounded RAM.
+  v3_shard_cache_size: 3
+  sparse_video_decode: true
+  image_augmentation:
+    # CPU ColorJitter/RandomAffine on 27 decoded frames/sample starves the
+    # 8-GPU trainer. Keep deterministic resize/normalization here; any future
+    # appearance augmentation should run batched on GPU after collation.
+    enabled: false
+    brightness: 0.10
+    contrast: 0.10
+    saturation: 0.05
+    hue: 0.02
+    degrees: 3.0
+    translate: 0.02
+    scale: 0.02
+
+distributed:
+  nnodes: 1
+  node_rank: 0
+  gpus_per_node: auto
+  master_addr: 127.0.0.1
+  master_port: 29500
+  # A 6B fully-trainable model all-reduces roughly 12 GB of BF16 gradients per
+  # optimizer update.  Missing libibverbs silently forced the first 4x8 run
+  # onto ~25 Gbit/s eth0 and limited it to ~107 samples/s.  Formal multi-node
+  # jobs now require verbs/mlx5/rdmacm plus mounted RDMA devices and force
+  # NCCL_NET=IB so that this cannot recur unnoticed.
+  require_rdma_for_multinode: true
+
+fastwam:
+  mode: smoke
+  recipe: joint_base
+  task_name: behavior1k_all_joint
+  model_id: Wan-AI/Wan2.2-TI2V-5B
+  tokenizer_model_id: Wan-AI/Wan2.1-T2V-1.3B
+  redirect_common_files: false
+  # TorchCodec 0.13 + system FFmpeg 6.1 was pixel-identical to PyAV on 15
+  # real three-camera clips and decoded ~14.5% faster on the development host.
+  video_backend: torchcodec
+  # Read-through node-local cache for 100-200 MiB LeRobot v3 video shards.
+  # All ranks/workers on a node share atomic copies; source BOS data is read-only.
+  video_local_cache_dir: /dev/shm/fastwam-behavior1k-video-cache
+  # The current 8-GPU node exposes a 942 GiB tmpfs and ~1.8 TiB host RAM.
+  # 750 GiB retains many task rotations while leaving ample memory headroom.
+  # Each node in a multi-node job owns an independent read-through cache.
+  video_local_cache_max_gib: 750
+  video_local_cache_for_bos_only: false
+  suppress_video_warnings: true
+  init: release
+  require_cuda: true
+  mixed_precision: bf16
+  wandb: false
+  direct_cuda_load: true
+
+  # ZeRO-1 permits no_sync during accumulation.  On 8 GPUs, two B8
+  # microbatches took ~13.3s versus ~20s with ZeRO-2 synchronizing both.
+  zero_stage: 1
+
+  continuation:
+    mode: warm_start
+    strict_compatibility: true
+    allow_legacy_state: false
+    source_checkpoint_sha256: 1000437cfcf55c000094f79a2600634c502bcb5b492476b94bf8509883a49579
+
+  checkpoints:
+    mode: full
+    mode_by_profile:
+      smoke: full
+      pilot: full
+      full: full
+    # Lightweight weight checkpoints are retained at 250-step cadence for
+    # manual selection; full ZeRO state uses the separate 1.25k/3-copy policy.
+    keep_last: 100
+    auto_resume: false
+    resume_run_id:
+    resume_state:
+    weights_checkpoint:
+
+  text_embeddings:
+    precompute: false
+    # Longest prompt is Task 49 (139 tokens including the FastWAM prefix).
+    context_len: 160
+    gpus: 1
+    overwrite: false
+    wait_timeout: 3600
+    master_addr: 127.0.0.1
+    master_port: 29517
+
+  # Full Video DiT + Action DiT + MoT + proprio encoder train jointly.  VAE and
+  # T5 stay frozen; task text is read from each sample's cached T5 embedding.
+  extra_overrides:
+    - train_action_expert_only=false
+    - model.loss.lambda_video=1.0
+    - model.loss.lambda_action=1.0
+    # B16 is the production-safe throughput maximum on the 8x96-GiB host.
+    # Disabling mixed-attention recomputation keeps the trainer compute-bound;
+    # the 32-step long run peaked at 85,745 MiB/GPU with ~12 GiB headroom.
+    - model.mot_checkpoint_mixed_attn=false
+    # The Wan VAE natively supports batching.  B8 real-shape measurement:
+    # 0.92s serial -> 0.21s batched, with ~3.4 GiB additional peak memory.
+    - model.vae_encode_batch_size=-1
+    - learning_rate=2e-5
+    - video_learning_rate=5e-6
+    - action_learning_rate=2e-5
+    - action_io_learning_rate=1e-4
+    - proprio_learning_rate=1e-4
+    - optimizer_betas=[0.9,0.95]
+    - optimizer_eps=1e-8
+    # Measured +1.3% throughput over eager AdamW with identical state layout.
+    - optimizer_fused=true
+    - lr_scheduler_type=wsd
+    - warmup_ratio=0.05
+    # GBS1536 * 1,250 preserves the previous 1.92M-sample warmup budget.
+    - warmup_steps=1250
+    - wsd_stable_ratio=0.95
+    - minimum_lr_ratio=0.01
+    # 1,250 steps keeps the previous 1.92M-sample exact-state cadence.
+    - state_save_every=1250
+    - keep_last_n_weight_checkpoints=100
+    - keep_last_n_state_checkpoints=3
+    - weight_decay=1e-2
+    - max_grad_norm=1.0
+    - sampling_strategy=task_hierarchical
+    - sampling_manifest_path=${oc.env:FASTWAM_SAMPLING_MANIFEST_PATH}
+    - eval_sampling_manifest_path=${oc.env:FASTWAM_EVAL_SAMPLING_MANIFEST_PATH}
+    - sampling_natural_probability=0.70
+    - sampling_skill_probability=0.20
+    - sampling_boundary_probability=0.10
+    - sampling_task_block_size=2
+    # A node keeps eight rank-local tasks active while ranks collectively cover
+    # the task mixture. Reuse 16 microsteps to amortize shard opens and decode.
+    - sampling_task_reuse_steps=16
+    - sampling_episode_batch_locality=true
+    # 48 ranks still provide 48 episodes per optimizer step.  Reusing each
+    # rank-local episode for eight microsteps amortizes three long MP4 shards.
+    - sampling_episode_reuse_steps=8
+    - sampling_window_batch_locality_span=128
+    # Exactly 1,024 optimizer steps/epoch at the formal GBS1536.
+    - samples_per_epoch=1572864
+    - drop_padded_windows=true
+    - pin_memory=true
+    - persistent_workers=true
+    - prefetch_factor=2
+    # Keep deterministic batch order for exact sampler continuation. The
+    # no-CPU-augmentation pipeline sustains 68.90 samples/s without reordering.
+    - dataloader_in_order=true
+    - torch_compile=false
+    - torch_compile_target=dit
+    - torch_compile_mode=default
+    - allow_tf32=true
+    - seed=42
+
+mode:
+  smoke:
+    max_steps: 1
+    batch_size: 1
+    num_workers: 0
+    save_every: 1
+    eval_every: 0
+    gradient_accumulation_steps: 1
+
+  pilot:
+    # Run this on the exact 6x8 topology first.  The development-host A/B found
+    # B16/acc2 stable at 68.90 samples/s/node and 97.96% GPU utilization.
+    # This proves B16, ZeRO-1, network, video decode, gradients and full-state
+    # checkpoint/reload before the long run.
+    max_steps: 50
+    batch_size: 16
+    num_workers: 12
+    save_every: 50
+    eval_every: 0
+    # Exact six-node topology: 16 samples/rank * 48 ranks * grad-acc 2.
+    target_global_batch_size: 1536
+    gradient_accumulation_steps: auto
+
+  full:
+    # Deliberately high manual-stop horizon. WSD uses a fixed 1.25k warmup, keeps
+    # the base LR for most of the run, and only decays near this distant cap.
+    # Treat selected intermediate weights as candidates, not as a requirement
+    # to consume this hundreds-of-sampler-epoch ceiling.
+    max_steps: 1000000
+    num_epochs: 1000
+    batch_size: 16
+    num_workers: 12
+    log_every: 10
+    # 250 steps = 384k samples, preserving the previous selection cadence.
+    save_every: 250
+    # Keep evaluation overhead bounded during the long run.
+    eval_every: 1250
+    target_global_batch_size: 1536
+    gradient_accumulation_steps: auto

@@ -1,0 +1,211 @@
+# Behavior-1K 2026 / Task 0 / FastWAM 真实后训练入口。
+#
+# 常用命令：
+#   python experiments/custom/fastwam_behavior1k_task0/run.py --dry-run
+#   python experiments/custom/fastwam_behavior1k_task0/run.py --config /path/to/pilot.yaml --dry-run
+#   python experiments/custom/fastwam_behavior1k_task0/run.py --prepare-only
+#   python experiments/custom/fastwam_behavior1k_task0/run.py --precompute-text-embeds
+#   python experiments/custom/fastwam_behavior1k_task0/run.py --dataset-smoke
+#   python experiments/custom/fastwam_behavior1k_task0/run.py
+#
+# 最后一条命令默认执行 smoke：真实加载 release checkpoint、一个 batch、一次反向更新、
+# checkpoint 落盘。临时切档用 --profile pilot/full 或 BAIGE_PROFILE，不必复制 YAML。
+
+backend: fastwam
+base_config: configs/fastwam/realrobot_train_eval.sh
+
+experiment:
+  name: fastwam_behavior1k_task0
+  route: custom
+  run_name: fastwam_behavior1k_task0
+  # 留空时自动生成。百舸优先使用平台 job id，并可从各节点一致的 MASTER_ADDR
+  # 兜底；任务名可能重复时显式设置 BAIGE_RUN_ID，防止输出目录碰撞。
+  run_id:
+
+environment:
+  # 当前开发机和训练镜像统一使用镜像默认 Python；入口不切换解释器。
+  # GPU 节点使用项目内完整资产。禁止 datasets / Hub 遥测和下载探测，避免
+  # 本地 Parquet 加载仍等待外网；缺资产时应直接失败并回管理节点准备。
+  offline: true
+
+paths:
+  run_root: runs/experiments/custom
+  # 正式 checkpoint 与 upstream 源码目录分离，持久化在项目共享盘。
+  checkpoint_root: checkpoints/custom/fastwam
+  fastwam_workdir: upstreams/FastWAM-realrobot
+  model_base: models
+  cache_root: upstreams
+
+  cache_paths:
+    torch_extensions: .cache/torch_extensions/fastwam
+    triton: .cache/triton/fastwam
+    xdg: .cache
+
+behavior1k:
+  # 开发机与训练镜像中的 BOS 只读挂载默认路径。临时换盘仍可使用
+  # --dataset-root 或 BEHAVIOR1K_DATA_ROOT 覆盖，优先级依次为 CLI > 环境变量 > 此值。
+  dataset_root_env: BEHAVIOR1K_DATA_ROOT
+  default_dataset_root: /mnt/bos/bos_0/datasets/2026-challenge-demos
+
+  # Task 0 是 turning_on_radio。run.py 会从 meta/episodes Parquet 实际发现 episode，
+  # 不依赖“恰好是 0..199”这一未经验证的假设。
+  task_index: 0
+  task_name: turning_on_radio
+  expected_episodes: 200
+
+  # 固定 seed 的 episode 级切分，禁止同一 trajectory 的 frame 同时进入训练与验证。
+  validation:
+    proportion: 0.01
+    seed: 42
+
+  # FastWAM 使用自己的 23D z-score stats，不能直接复用 release 的 7D/8D stats，
+  # 也不能直接使用原始 61D state stats。文件不存在时，非 dry-run 会按 Task 0
+  # 的实际 data shard 流式计算一次，之后所有实验复用。
+  norm_stats_path: data/custom/fastwam/behavior1k/task0000_train198_seed42_norm_stats.json
+
+  # FastWAM dataloader 读取预计算 T5 context。训练 wrapper 会按 text_embeddings
+  # 配置调用上游真实 precompute_text_embeds.py，不在线伪造 embedding。
+  text_embedding_cache_dir: data/custom/fastwam/behavior1k/text_embeds/task0000
+
+  # true 时只解码模型实际使用的 0,4,...,32 九个 RGB 时刻，并跳过未配置的
+  # depth 流；state/action 仍保持 33/32 步，模型输入与旧路径相同。
+  # 如需复现实验旧路径可设 false，吞吐会明显下降。
+  sparse_video_decode: true
+
+  # 只对训练 split 生效；同一相机的 9 个时间帧共享一次随机参数。禁用水平翻转，
+  # 避免破坏左右腕语义。采样器为每次窗口出现生成可恢复的确定性 seed。
+  image_augmentation:
+    enabled: true
+    brightness: 0.10
+    contrast: 0.10
+    saturation: 0.05
+    hue: 0.02
+    degrees: 3.0
+    translate: 0.02
+    scale: 0.02
+
+distributed:
+  # auto 优先读取 FASTWAM_GPUS_PER_NODE / NPROC_PER_NODE，其次读取当前可见 CUDA。
+  # 同一份配置可直接适配单卡、4 卡和 8 卡节点。
+  nnodes: 1
+  node_rank: 0
+  gpus_per_node: auto
+  master_addr: 127.0.0.1
+  master_port: 29500
+
+fastwam:
+  # smoke=1 step；pilot=20 step；full=固定 20,000 optimizer steps。
+  mode: smoke
+  recipe: joint_base
+  task_name: behavior1k_task0_action_only
+
+  model_id: Wan-AI/Wan2.2-TI2V-5B
+  tokenizer_model_id: Wan-AI/Wan2.1-T2V-1.3B
+  redirect_common_files: false
+  video_backend: pyav
+  suppress_video_warnings: true
+
+  # release 路线会加载 7D LIBERO FastWAM 权重。23D 不匹配的三个 action
+  # input/output tensor 和 8D->23D proprio weight 会按 overlay 的真实
+  # shape-compatible loader 跳过并重新训练；共享 video/action backbone 会加载。
+  # 真实 FastWAM.load_checkpoint 调用会由 rank 0 在本次 run_dir 写出
+  # model_load_report.json，逐项记录 loaded / shape_mismatch / reinitialized。
+  init: release
+  require_cuda: true
+  mixed_precision: bf16
+  wandb: false
+
+  # 多 rank 启动时减少大模型在主机内存中的临时副本：模型在目标 CUDA/bf16
+  # 上直接构造，release checkpoint 直接映射到 CUDA；关闭时保持上游行为。
+  direct_cuda_load: true
+
+  # 明确区分权重初始化、新训练阶段和完整状态恢复。默认 release 是 warm_start：
+  # 只加载 shape-compatible 模型权重，optimizer/scheduler/step/RNG 均从头开始。
+  continuation:
+    mode: warm_start
+    strict_compatibility: true
+    allow_legacy_state: false
+    source_checkpoint_sha256: 1000437cfcf55c000094f79a2600634c502bcb5b492476b94bf8509883a49579
+
+  checkpoints:
+    # delta 是默认低内存推理产物；full 保存 Accelerator/DeepSpeed 完整训练状态。
+    mode: delta
+    # smoke 只产出轻量权重用于接口验证；pilot/full 默认保留 Accelerator/
+    # DeepSpeed 完整状态，才能从 checkpoints/state/step_xxxxxx 精确恢复。
+    mode_by_profile:
+      smoke: delta
+      pilot: full
+      full: full
+    # weights 与 state 使用同一个保留数量，避免共享盘被长期训练无限占满。
+    keep_last: 3
+    # 默认绝不隐式续训；需要时用 --resume-latest/--resume-state，或显式改为 true。
+    auto_resume: false
+    resume_run_id:
+    resume_state:
+    # 仅用于完成一个 stage 后启动新的 optimizer/scheduler 阶段；必须指向本项目
+    # checkpoint_mode=full 的 checkpoints/weights/step_xxxxxx.pt。日常用 CLI 覆盖。
+    weights_checkpoint:
+
+  text_embeddings:
+    # UMT5 权重约 11 GB，上游脚本会先把整份权重加载到 CPU，之后才检查缓存。
+    # 因此在大内存管理节点预计算一次，GPU 训练节点只读现成缓存。
+    precompute: false
+    context_len: 128
+    gpus: 1
+    overwrite: false
+    wait_timeout: 3600
+    master_addr: 127.0.0.1
+    master_port: 29517
+
+  # 这些覆盖进入上游真实 Hydra 训练；不是本项目里的 CPU/toy 实现。
+  # 正式微调基线固定为：release 初始化、冻结 video expert，只训练 action expert
+  # 与 proprio encoder。优化器由 FastWAM Trainer 固定为 AdamW(beta=0.9/0.95)。
+  extra_overrides:
+    - train_action_expert_only=true
+    - model.loss.lambda_video=0.0
+    - model.loss.lambda_action=1.0
+    - model.action_dim_loss_weights=[1,1,1,1,1,1,1,1,1,1,1,1,1,1,3,1,1,1,1,1,1,1,3]
+    # 8×A800 action-only 实测：关闭后平均显存仍约 33.3 GiB/GPU，稳态吞吐提高约 16%。
+    # video expert 已冻结，保留 checkpointing 只会引入不必要的重复计算。
+    - model.mot_checkpoint_mixed_attn=false
+    # 把正式微调的优化配置显式固定在项目 YAML 中，避免依赖 upstream 默认值漂移。
+    - learning_rate=2e-5
+    - lr_scheduler_type=cosine
+    - weight_decay=1e-2
+    - max_grad_norm=1.0
+    - sampling_strategy=episode_uniform
+    - samples_per_epoch=262144
+    - drop_padded_windows=true
+    - seed=42
+
+mode:
+  smoke:
+    # 真实 one-batch/one-update 检查，会加载 5B 模型并需要 CUDA。
+    max_steps: 1
+    batch_size: 1
+    num_workers: 0
+    save_every: 1
+    eval_every: 0
+    gradient_accumulation_steps: 1
+
+  pilot:
+    # 8×A800 80GB、64 CPU 核、>=120 GiB 主机内存的已验证短训配置。
+    # 每卡 B8、全局 batch 64；默认 sparse decode + 关闭 gradient checkpointing。
+    max_steps: 20
+    batch_size: 8
+    num_workers: 6
+    save_every: 20
+    eval_every: 20
+    gradient_accumulation_steps: 1
+
+  full:
+    # 同一台 8×A800/64 核机器的稳健长训起点。B12 稳态收益不足 1%（约 0.3%），
+    # 却把平均显存从约 33.3 GiB 增至约 40.1 GiB，因此长期实验保留 B8/W6。
+    # batch 改变会影响每 epoch update 数；若调整它，需要同步审视 LR/schedule。
+    batch_size: 8
+    num_workers: 6
+    max_steps: 20000
+    num_epochs: 5
+    save_every: 500
+    eval_every: 500
+    gradient_accumulation_steps: 1

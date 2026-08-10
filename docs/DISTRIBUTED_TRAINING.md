@@ -1,6 +1,10 @@
 # 多机分布式训练启动说明
 
-当前项目里，LeRobot/pi05 和 custom/FastWAM 都已经有单机多卡和两节点入口。
+> [!WARNING]
+> Legacy 文档。本文记录的是已经停用的 SSH/cluster120 实验，不能用于当前节点。
+> 新平台的多机入口必须在 Task 0 单机训练、checkpoint 重载和离线推理通过后重新验证。
+
+旧环境中，LeRobot/pi05 和 custom/FastWAM 曾使用过单机多卡和两节点入口。
 
 项目约定是：每个真实实验目录自己维护 `config.yaml + run.py`。日常不要手写底层 launcher 长命令，也不要新建根目录总入口；要跑哪个实验，就执行哪个实验目录下的 `run.py`。
 

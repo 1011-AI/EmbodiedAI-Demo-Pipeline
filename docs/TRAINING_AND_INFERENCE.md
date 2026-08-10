@@ -1,6 +1,12 @@
 # Training and Inference Runbook
 
-这份文档是当前训练/推理使用方法的唯一主入口。旧规划文档只作为背景参考；真正启动实验时，以这里和 `experiments/<route>/<experiment>/` 为准。
+> [!WARNING]
+> Legacy 文档。旧 `gpu11`、Baige/cluster120、环境名和绝对路径均不再有效。
+> 当前 BEHAVIOR-1K 训练与推理只使用
+> [`BEHAVIOR1K_2026.md`](BEHAVIOR1K_2026.md) 及对应实验目录的 YAML + `run.py`。
+
+以下内容仅用于追溯旧实验；真正启动当前实验时，以
+`BEHAVIOR1K_2026.md` 和 `experiments/<route>/<experiment>/` 为准。
 
 ## 0. 基础约定
 

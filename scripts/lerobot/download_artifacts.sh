@@ -16,11 +16,13 @@ export HUGGINGFACE_HUB_CACHE="${HUGGINGFACE_HUB_CACHE:-$HF_HOME/hub}"
 export HF_DATASETS_CACHE="${HF_DATASETS_CACHE:-$HF_HOME/datasets}"
 
 LEROBOT_DATASET_REPO_ID="${LEROBOT_DATASET_REPO_ID:-lerobot/pusht}"
+LEROBOT_DATASET_REVISION="${LEROBOT_DATASET_REVISION:-}"
 LEROBOT_DATASET_NAME="${LEROBOT_DATASET_NAME:-${LEROBOT_DATASET_REPO_ID#*/}}"
 LEROBOT_DATASET_LOCAL_DIR="${LEROBOT_DATASET_LOCAL_DIR:-$EMBODIED_DATA_ROOT/lerobot/$LEROBOT_DATASET_NAME}"
 
 LEROBOT_POLICY_TYPE="${LEROBOT_POLICY_TYPE:-act}"
 LEROBOT_POLICY_REPO_ID="${LEROBOT_POLICY_REPO_ID:-}"
+LEROBOT_POLICY_REVISION="${LEROBOT_POLICY_REVISION:-}"
 LEROBOT_POLICY_NAME="${LEROBOT_POLICY_NAME:-${LEROBOT_POLICY_REPO_ID##*/}}"
 LEROBOT_POLICY_LOCAL_DIR="${LEROBOT_POLICY_LOCAL_DIR:-$EMBODIED_MODEL_ROOT/lerobot/$LEROBOT_POLICY_TYPE/${LEROBOT_POLICY_NAME:-manual_checkpoint}}"
 
@@ -36,6 +38,15 @@ HFD_BIN="${HFD_BIN:-/home/scut/hfd.sh}"
 HFD_THREADS="${HFD_THREADS:-10}"
 HFD_JOBS="${HFD_JOBS:-4}"
 HFD_TOOL="${HFD_TOOL:-aria2c}"
+
+DATASET_REVISION_ARGS=()
+POLICY_REVISION_ARGS=()
+if [[ -n "$LEROBOT_DATASET_REVISION" ]]; then
+  DATASET_REVISION_ARGS=(--revision "$LEROBOT_DATASET_REVISION")
+fi
+if [[ -n "$LEROBOT_POLICY_REVISION" ]]; then
+  POLICY_REVISION_ARGS=(--revision "$LEROBOT_POLICY_REVISION")
+fi
 
 if [[ -f "$HFD_BIN" ]]; then
   DOWNLOADER_KIND="hfd"
@@ -103,8 +114,10 @@ EOF
 
 echo "[artifact] family=$ARTIFACT_FAMILY"
 echo "[artifact] dataset_repo=$LEROBOT_DATASET_REPO_ID"
+echo "[artifact] dataset_revision=${LEROBOT_DATASET_REVISION:-<default>}"
 echo "[artifact] dataset_local_dir=$LEROBOT_DATASET_LOCAL_DIR"
 echo "[artifact] policy_repo=${LEROBOT_POLICY_REPO_ID:-<none>}"
+echo "[artifact] policy_revision=${LEROBOT_POLICY_REVISION:-<default>}"
 echo "[artifact] policy_local_dir=$LEROBOT_POLICY_LOCAL_DIR"
 echo "[artifact] manifest=$MANIFEST_PATH"
 if [[ "$DOWNLOADER_KIND" == "hfd" ]]; then
@@ -128,6 +141,7 @@ if [[ "$DOWNLOAD_LEROBOT_DATASET" == "1" ]]; then
       bash "$HFD_BIN" "$LEROBOT_DATASET_REPO_ID" \
         --dataset \
         --local-dir "$LEROBOT_DATASET_LOCAL_DIR" \
+        "${DATASET_REVISION_ARGS[@]}" \
         --tool "$HFD_TOOL" \
         -x "$HFD_THREADS" \
         -j "$HFD_JOBS"; then
@@ -138,6 +152,7 @@ if [[ "$DOWNLOAD_LEROBOT_DATASET" == "1" ]]; then
     if ! HF_HUB_ENABLE_HF_TRANSFER="$HF_HUB_ENABLE_HF_TRANSFER" \
       "${HF_DOWNLOAD_CMD[@]}" "$LEROBOT_DATASET_REPO_ID" \
         --repo-type dataset \
+        "${DATASET_REVISION_ARGS[@]}" \
         --local-dir "$LEROBOT_DATASET_LOCAL_DIR"; then
       print_download_failure_help "$LEROBOT_DATASET_REPO_ID" "$LEROBOT_DATASET_LOCAL_DIR"
       exit 1
@@ -161,6 +176,7 @@ if [[ "$DOWNLOAD_LEROBOT_POLICY" == "1" ]]; then
     if ! HF_ENDPOINT="$HF_ENDPOINT" \
       bash "$HFD_BIN" "$LEROBOT_POLICY_REPO_ID" \
         --local-dir "$LEROBOT_POLICY_LOCAL_DIR" \
+        "${POLICY_REVISION_ARGS[@]}" \
         --tool "$HFD_TOOL" \
         -x "$HFD_THREADS" \
         -j "$HFD_JOBS"; then
@@ -170,6 +186,7 @@ if [[ "$DOWNLOAD_LEROBOT_POLICY" == "1" ]]; then
   else
     if ! HF_HUB_ENABLE_HF_TRANSFER="$HF_HUB_ENABLE_HF_TRANSFER" \
       "${HF_DOWNLOAD_CMD[@]}" "$LEROBOT_POLICY_REPO_ID" \
+        "${POLICY_REVISION_ARGS[@]}" \
         --local-dir "$LEROBOT_POLICY_LOCAL_DIR"; then
       print_download_failure_help "$LEROBOT_POLICY_REPO_ID" "$LEROBOT_POLICY_LOCAL_DIR"
       exit 1
@@ -182,8 +199,10 @@ fi
 
 ARTIFACT_FAMILY="$ARTIFACT_FAMILY" \
 LEROBOT_DATASET_REPO_ID="$LEROBOT_DATASET_REPO_ID" \
+LEROBOT_DATASET_REVISION="$LEROBOT_DATASET_REVISION" \
 LEROBOT_DATASET_LOCAL_DIR="$LEROBOT_DATASET_LOCAL_DIR" \
 LEROBOT_POLICY_REPO_ID="$LEROBOT_POLICY_REPO_ID" \
+LEROBOT_POLICY_REVISION="$LEROBOT_POLICY_REVISION" \
 LEROBOT_POLICY_TYPE="$LEROBOT_POLICY_TYPE" \
 LEROBOT_POLICY_LOCAL_DIR="$LEROBOT_POLICY_LOCAL_DIR" \
 dataset_downloaded="$dataset_downloaded" \
@@ -201,11 +220,13 @@ manifest = {
     "created_at": datetime.now(timezone.utc).isoformat(),
     "dataset": {
         "repo_id": os.environ["LEROBOT_DATASET_REPO_ID"],
+        "requested_revision": os.environ["LEROBOT_DATASET_REVISION"],
         "local_dir": os.environ["LEROBOT_DATASET_LOCAL_DIR"],
         "downloaded": os.environ["dataset_downloaded"] == "true",
     },
     "policy": {
         "repo_id": os.environ.get("LEROBOT_POLICY_REPO_ID", ""),
+        "requested_revision": os.environ["LEROBOT_POLICY_REVISION"],
         "policy_type": os.environ["LEROBOT_POLICY_TYPE"],
         "local_dir": os.environ["LEROBOT_POLICY_LOCAL_DIR"],
         "downloaded": os.environ["policy_downloaded"] == "true",

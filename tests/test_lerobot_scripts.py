@@ -60,6 +60,7 @@ def test_lerobot_yaml_runner_renders_pi05_config(tmp_path: Path) -> None:
             str(generated),
         ],
         cwd=ROOT,
+        env={**os.environ, "NCCL_DEBUG": ""},
         text=True,
         capture_output=True,
         check=True,

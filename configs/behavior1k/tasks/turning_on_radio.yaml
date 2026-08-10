@@ -1,0 +1,10 @@
+# BEHAVIOR-1K Task 0：第一条后训练与闭环评测贯通任务。
+schema_version: "1.0"
+task_index: 0
+task_name: turning_on_radio
+instruction: Turn on the radio receiver that's on the table in the living room.
+
+# 留空表示使用该任务全部 200 个 episode。
+# 调试时可显式写成 [0, 1, 2, ...]，但这些值必须是 global episode_index，
+# 不能使用 raw_episode_id 猜测分片位置。
+episode_indices:

@@ -1,0 +1,73 @@
+# BEHAVIOR-1K 2026 Challenge 数据源契约。
+# 公共配置不写任何集群绝对路径。运行前设置：
+#   export BEHAVIOR1K_DATA_ROOT=/path/to/2026-challenge-demos
+#
+# 快速检查：
+#   embodied-demo behavior1k-doctor --config configs/behavior1k/dataset_2026.yaml
+#
+# 全量文件计数（会遍历 3 TB 数据的目录索引，但不会解码所有视频）：
+#   embodied-demo behavior1k-doctor \
+#     --config configs/behavior1k/dataset_2026.yaml \
+#     --scan-mode full_index
+
+schema_version: "1.0"
+
+dataset:
+  repo_id: behavior-1k/2026-challenge-demos
+
+  # 2026-07-28 修复后的 Hub revision。训练和评测必须记录这个指纹；
+  # 不要把仅有 tasks.jsonl 当作全量数据已更新的充分证据。
+  revision: 2add61313bac4f1a42363d00ad03bd45949941a8
+
+  # root 留空表示从 root_env 读取。仅临时调试时才用 CLI --root 覆盖。
+  root:
+  root_env: BEHAVIOR1K_DATA_ROOT
+
+expected:
+  codebase_version: v3.0
+  robot_type: R1Pro
+  fps: 30
+  total_tasks: 100
+  total_episodes: 20000
+  total_frames: 210916774
+  state_dim: 61
+  action_dim: 23
+
+  # 955 只指 data/ 下的训练分片；另有 100 个 episode metadata Parquet
+  # 和一个 meta/tasks.parquet。
+  data_parquet_files: 955
+  episode_parquet_files: 100
+  video_files: 17093
+  annotation_files: 20000
+
+  # 源数据完整性契约包含 3 RGB + 3 Depth。第一阶段训练只选择 RGB，
+  # 但 doctor 仍会检查 info.json 中六路视频字段均存在。
+  video_keys:
+    - observation.rgb.zed_link_camera_0
+    - observation.rgb.left_realsense_link_camera_0
+    - observation.rgb.right_realsense_link_camera_0
+    - observation.depth_linear.zed_link_camera_0
+    - observation.depth_linear.left_realsense_link_camera_0
+    - observation.depth_linear.right_realsense_link_camera_0
+
+selection:
+  # 首期只做 Task 0。扩任务时复制实验配置，不要移动或重排原始 3 TB 数据。
+  task_indices: [0]
+
+  # π0.5 与 FastWAM 第一阶段共用这三路 RGB，顺序为 head、left、right。
+  video_keys:
+    - observation.rgb.zed_link_camera_0
+    - observation.rgb.left_realsense_link_camera_0
+    - observation.rgb.right_realsense_link_camera_0
+
+doctor:
+  # metadata: 只检查 JSON/schema，不需要 PyArrow。
+  # selected_task: 读取所选任务 episode metadata，并验证其数据/视频/标注引用。
+  # full_index: 在 selected_task 基础上统计全库文件数量。
+  scan_mode: selected_task
+
+  # 旧下载工具通常没有保存 revision marker，因此先告警而不是直接失败；
+  # 数据增量同步完成后应写入 .dataset_revision 并改为 true。
+  require_revision_marker: false
+  verify_annotations: true
+  sample_rows_per_data_file: 16

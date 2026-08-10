@@ -18,6 +18,16 @@ dependencies = [
 dev = [
   "pytest>=8,<9",
 ]
+behavior1k = [
+  "av>=15,<17",
+  "msgpack>=1,<2",
+  # OpenPI-Comet/JAX 0.5.3 is pinned to NumPy 1.x.  Keep the shared B1K
+  # adapter compatible with the actual image instead of letting this extra
+  # silently upgrade NumPy and break the Comet backend.
+  "numpy>=1.26,<2.0",
+  "pyarrow>=18,<26",
+  "websockets>=13,<17",
+]
 
 [project.scripts]
 embodied-demo = "embodied_demo.cli:main"

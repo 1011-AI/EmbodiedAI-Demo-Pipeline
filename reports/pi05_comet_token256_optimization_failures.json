@@ -1,0 +1,23 @@
+{
+  "schema_version": "1.0",
+  "records": [
+    {
+      "run_id": "pi05-bench-token256-opt-all-dots-v1",
+      "profile": "benchmark_b8_io8_all_dots",
+      "status": "runtime_failure",
+      "reason": "XLA FSDP rejected the rematerialized graph: INVALID_ARGUMENT: All buffers must have the same element type and count"
+    },
+    {
+      "run_id": "pi05-bench-token256-opt-cudnn-v1",
+      "profile": "benchmark_b8_io8_cudnn",
+      "status": "compile_failure",
+      "reason": "JAX cuDNN attention requires head_dim <= 128 and divisible by 8; Pi0.5 Gemma head_dim is 256"
+    },
+    {
+      "run_id": "pi05-bench-token256-opt-xla-gemma-no-remat-v1",
+      "profile": "benchmark_b8_io8_xla_gemma_no_remat",
+      "status": "oom",
+      "reason": "RESOURCE_EXHAUSTED while allocating 65.74 GiB; XLA estimated the graph at approximately 75 GiB"
+    }
+  ]
+}

@@ -11,10 +11,20 @@
 
 ```text
 configs/
-├── lerobot/     # LeRobot train/infer profiles
-├── fastwam/     # Custom WAM / FastWAM defaults
-└── imagewam/    # Custom WAM / ImageWAM defaults
+├── lerobot/      # LeRobot train/infer profiles
+├── fastwam/      # Custom WAM / FastWAM defaults
+├── imagewam/     # Custom WAM / ImageWAM defaults
+└── behavior1k/   # 2026 Challenge data/evaluation contracts
 ```
+
+## BEHAVIOR-1K 2026
+
+`behavior1k/dataset_2026.yaml` 是 2026 Challenge 数据源的固定契约，
+`behavior1k/tasks/` 保存可复用的任务选择。公共配置只引用
+`BEHAVIOR1K_DATA_ROOT`，不会提交某台集群的绝对路径。
+
+第一阶段只读取 Task 0 的 episode metadata 和三路 RGB。原始数据保持只读，
+状态映射、动作语义和视频分片引用由 `embodied_demo.behavior1k` 统一管理。
 
 ## LeRobot
 

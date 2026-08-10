@@ -40,8 +40,9 @@ Custom WAM 不承诺所有后端接口完全一致，但要统一这些工程边
 定位：
 
 - 当前 custom 后端的第一条可落地路线；
-- 使用 custom/FastWAM 路线自己的 FastWAM release 权重和 LIBERO 数据；
-- 结合 `D-URing/fastwam-realrobot-pipeline` 私有 overlay 做 realrobot 微调/评测。
+- 当前主线使用 FastWAM release 权重和 BEHAVIOR-1K Task 0 数据；
+- 已验证真实后训练、base→delta 重载、离线推理和统一 policy server；
+- LIBERO/realrobot 目录只保留为历史回归路线。
 
 ### ImageWAM
 
@@ -59,7 +60,8 @@ Custom WAM 不承诺所有后端接口完全一致，但要统一这些工程边
 ```text
 data/
 └── custom/
-    ├── fastwam/libero-fastwam/      # custom/FastWAM 原生 LIBERO 数据
+    ├── fastwam/behavior1k/          # FastWAM 23D stats 与 task text cache
+    ├── fastwam/libero-fastwam/      # 历史 FastWAM/LIBERO 数据
     └── imagewam/robotwin2.0/        # ImageWAM 可选 RoboTwin 数据
 
 models/
@@ -75,7 +77,14 @@ upstreams/
 
 注意：这些资产目录均被 `.gitignore` 忽略，只提交 README/配置/脚本，不提交大文件。
 
-LeRobot 路线如果也需要 LIBERO/FastWAM 数据，使用独立目录：
+当前 BEHAVIOR Task 0 的共享数据视图位于：
+
+```text
+data/behavior1k/views/r1pro_policy23/turning_on_radio/
+data/behavior1k/materialized/turning_on_radio/
+```
+
+LeRobot 路线如果也需要历史 LIBERO/FastWAM 数据，使用独立目录：
 
 ```text
 data/lerobot/libero-fastwam/v2.1/

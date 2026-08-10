@@ -70,6 +70,132 @@ def _command_report_fastwam(args: argparse.Namespace) -> int:
     return 0
 
 
+def _command_behavior1k_doctor(args: argparse.Namespace) -> int:
+    # Keep PyArrow and other Behavior-only dependencies outside the core import
+    # path. Metadata-only checks work in the lightweight project environment.
+    from embodied_demo.behavior1k.dataset import (
+        load_dataset_config,
+        resolve_dataset_root,
+        run_dataset_doctor,
+    )
+
+    config = load_dataset_config(args.config)
+    if args.scan_mode:
+        config.doctor.scan_mode = args.scan_mode
+    root = resolve_dataset_root(config, root_override=args.root)
+    report = run_dataset_doctor(config, root=root)
+    content = json.dumps(report.model_dump(mode="json"), ensure_ascii=False, indent=2) + "\n"
+    _write_text(Path(args.output).expanduser().resolve(), content)
+    failed = sum(check.status == "fail" for check in report.checks)
+    warnings = sum(check.status == "warning" for check in report.checks)
+    print(
+        "BEHAVIOR1K_DOCTOR "
+        f"passed={str(report.passed).lower()} "
+        f"failed={failed} warnings={warnings} "
+        f"root={report.dataset_root}"
+    )
+    print(f"REPORT {Path(args.output).expanduser().resolve()}")
+    return 0 if report.passed else 1
+
+
+def _command_behavior1k_prepare_view(args: argparse.Namespace) -> int:
+    from embodied_demo.behavior1k.dataset import (
+        load_dataset_config,
+        load_task_config,
+        resolve_dataset_root,
+    )
+    from embodied_demo.behavior1k.view import prepare_virtual_view
+
+    config = load_dataset_config(args.config)
+    task = load_task_config(args.task_config)
+    root = resolve_dataset_root(config, root_override=args.root)
+    output_dir = Path(args.output_dir).expanduser().resolve()
+    manifest = prepare_virtual_view(
+        source_root=root,
+        output_dir=output_dir,
+        config=config,
+        task=task,
+    )
+    print(
+        "BEHAVIOR1K_VIEW_READY "
+        f"task={manifest.task.task_name} episodes={manifest.episode_count} "
+        f"frames={manifest.frame_count}"
+    )
+    print(f"MANIFEST {output_dir / 'view_manifest.json'}")
+    return 0
+
+
+def _command_behavior1k_materialize_view(args: argparse.Namespace) -> int:
+    from embodied_demo.behavior1k.materialize import materialize_behavior_view
+
+    result = materialize_behavior_view(
+        view_dir=args.view_dir,
+        output_root=args.output_root,
+        mode=args.mode,
+        state_layout=args.state_layout,
+        source_root_override=args.source_root,
+    )
+    projection = result["projection"]
+    inventory = result["inventory"]
+    print(
+        "BEHAVIOR1K_MATERIALIZED "
+        f"mode={projection['mode']} state={projection['state_layout']} "
+        f"episodes={projection['episode_count']} "
+        f"files={inventory['materialized_file_count']} "
+        f"bytes={inventory['materialized_bytes']} "
+        f"inode_reuse={inventory['inode_reuse_file_count']}"
+    )
+    print(f"ROOT {projection['output_root']}")
+    print(f"MANIFEST {Path(projection['output_root']) / 'materialization_manifest.json'}")
+    return 0
+
+
+def _command_behavior1k_contract_smoke(args: argparse.Namespace) -> int:
+    from embodied_demo.behavior1k.protocol import BehaviorPolicySession, packb, unpackb
+
+    try:
+        import numpy as np
+    except ImportError as exc:
+        raise PipelineError(
+            "behavior1k-contract-smoke requires NumPy and MessagePack; "
+            "install the Behavior extras with: pip install -e '.[behavior1k]'"
+        ) from exc
+
+    class StubPolicy:
+        def __init__(self) -> None:
+            self.reset_count = 0
+
+        def predict_action_chunk(self, observation: dict[str, object]) -> object:
+            horizon = int(observation.get("horizon", 4))
+            return np.zeros((horizon, 23), dtype=np.float32)
+
+        def reset(self) -> None:
+            self.reset_count += 1
+
+    policy = StubPolicy()
+    session = BehaviorPolicySession(
+        policy,
+        metadata={"policy": "contract_stub", "action_dim": 23},
+        execution_horizon=args.execution_horizon,
+    )
+    metadata = unpackb(session.open_frame())
+    response = unpackb(session.handle_frame(packb({"horizon": args.chunk_horizon})))
+    reset_response = session.handle_frame(packb({"reset": True}))
+    if (
+        metadata.get("action_dim") != 23
+        or tuple(response["action"].shape) != (23,)
+        or reset_response is not None
+        or policy.reset_count != 1
+    ):
+        raise PipelineError("BEHAVIOR-1K policy contract smoke failed")
+    print(
+        "BEHAVIOR1K_CONTRACT_SMOKE_OK "
+        f"action_shape={tuple(response['action'].shape)} "
+        f"execution_horizon={args.execution_horizon} reset_ack=false"
+    )
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="embodied-demo",
@@ -95,6 +221,92 @@ def build_parser() -> argparse.ArgumentParser:
     )
     export_schema.add_argument("--output-dir", type=Path, default=Path("schemas"))
     export_schema.set_defaults(handler=_command_export_schema)
+
+    behavior_doctor = subparsers.add_parser(
+        "behavior1k-doctor",
+        help="validate a local BEHAVIOR-1K 2026 dataset without loading a model",
+    )
+    behavior_doctor.add_argument(
+        "--config",
+        type=Path,
+        default=Path("configs/behavior1k/dataset_2026.yaml"),
+    )
+    behavior_doctor.add_argument("--root", type=Path)
+    behavior_doctor.add_argument(
+        "--scan-mode",
+        choices=["metadata", "selected_task", "full_index"],
+    )
+    behavior_doctor.add_argument(
+        "--output",
+        type=Path,
+        default=Path("runs/behavior1k/doctor/report.json"),
+    )
+    behavior_doctor.set_defaults(handler=_command_behavior1k_doctor)
+
+    behavior_view = subparsers.add_parser(
+        "behavior1k-prepare-view",
+        help="write a zero-copy task/episode manifest for both model routes",
+    )
+    behavior_view.add_argument(
+        "--config",
+        type=Path,
+        default=Path("configs/behavior1k/dataset_2026.yaml"),
+    )
+    behavior_view.add_argument(
+        "--task-config",
+        type=Path,
+        default=Path("configs/behavior1k/tasks/turning_on_radio.yaml"),
+    )
+    behavior_view.add_argument("--root", type=Path)
+    behavior_view.add_argument(
+        "--output-dir",
+        type=Path,
+        default=Path("data/behavior1k/views/r1pro_policy23/turning_on_radio"),
+    )
+    behavior_view.set_defaults(handler=_command_behavior1k_prepare_view)
+
+    behavior_materialize = subparsers.add_parser(
+        "behavior1k-materialize-view",
+        help="materialize one task view into a GPU-visible LeRobot v3 root",
+    )
+    behavior_materialize.add_argument(
+        "--view-dir",
+        type=Path,
+        default=Path("data/behavior1k/views/r1pro_policy23/turning_on_radio"),
+    )
+    behavior_materialize.add_argument(
+        "--output-root",
+        type=Path,
+        default=Path("data/behavior1k/materialized/turning_on_radio"),
+    )
+    behavior_materialize.add_argument(
+        "--mode",
+        choices=["hardlink", "copy"],
+        default="hardlink",
+    )
+    behavior_materialize.add_argument(
+        "--state-layout",
+        choices=["raw61", "policy23"],
+        default="raw61",
+        help=(
+            "raw61 keeps source Parquet unchanged; policy23 rewrites only selected "
+            "numeric shards to the canonical R1Pro policy state"
+        ),
+    )
+    behavior_materialize.add_argument(
+        "--source-root",
+        type=Path,
+        help="optional management-node source-root remap; episode/file paths still come from the view",
+    )
+    behavior_materialize.set_defaults(handler=_command_behavior1k_materialize_view)
+
+    behavior_contract = subparsers.add_parser(
+        "behavior1k-contract-smoke",
+        help="exercise metadata/action/reset semantics without a model or simulator",
+    )
+    behavior_contract.add_argument("--chunk-horizon", type=int, default=32)
+    behavior_contract.add_argument("--execution-horizon", type=int, default=8)
+    behavior_contract.set_defaults(handler=_command_behavior1k_contract_smoke)
 
     return parser
 

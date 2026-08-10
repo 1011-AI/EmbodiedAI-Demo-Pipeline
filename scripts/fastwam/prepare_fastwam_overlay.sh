@@ -6,14 +6,13 @@
 #        FASTWAM_SOURCE_MODE=sync bash scripts/fastwam/prepare_fastwam_overlay.sh
 #      这会把官方 FastWAM + realrobot overlay 合成为 upstreams/FastWAM-realrobot。
 #
-#   2. 仍在有网络的管理/登录节点，安装共享 conda 环境：
-#        FASTWAM_SOURCE_MODE=reuse FASTWAM_CREATE_CONDA=1 FASTWAM_INSTALL=1 \
+#   2. 仍在有网络的镜像构建节点，把非 Torch 依赖安装到默认 Python：
+#        FASTWAM_SOURCE_MODE=reuse FASTWAM_CREATE_CONDA=0 FASTWAM_INSTALL=1 \
+#        FASTWAM_SKIP_TORCH_INSTALL=1 FASTWAM_INSTALL_NVCC=0 \
 #        bash scripts/fastwam/prepare_fastwam_overlay.sh
-#      注意：不要在不能联网的计算节点上做 pip/conda 安装。
+#      注意：不要在计算节点安装依赖，也不要覆盖镜像预装 Torch/CUDA。
 #
-#   3. 计算节点只激活环境并训练：
-#        source .../miniconda3/etc/profile.d/conda.sh
-#        conda activate fastwam
+#   3. 计算节点直接使用镜像默认 Python 训练：
 #        python experiments/custom/fastwam_realrobot_single8_random/run.py
 #
 # 本脚本只准备环境和源码，不启动训练。
@@ -43,6 +42,9 @@ FASTWAM_PIP_RETRIES="${FASTWAM_PIP_RETRIES:-20}"
 FASTWAM_PIP_RESUME_RETRIES="${FASTWAM_PIP_RESUME_RETRIES:-50}"
 FASTWAM_CUSTOM_LIBERO_DATA="${FASTWAM_CUSTOM_LIBERO_DATA:-$EMBODIED_REPO_ROOT/data/custom/fastwam/libero-fastwam}"
 FASTWAM_EXTRACT_CUSTOM_LIBERO_DATA="${FASTWAM_EXTRACT_CUSTOM_LIBERO_DATA:-1}"
+# BEHAVIOR-1K 等非 LIBERO 实验只需要源码/环境，不应被旧 LIBERO 资产阻塞。
+# 设为 0 时跳过 LIBERO 解压、校验和兼容 symlink；默认 1 保持原有实验行为。
+FASTWAM_PREPARE_LIBERO_DATA="${FASTWAM_PREPARE_LIBERO_DATA:-1}"
 FASTWAM_SKIP_TORCH_INSTALL="${FASTWAM_SKIP_TORCH_INSTALL:-0}"
 FASTWAM_SKIP_PIP_BOOTSTRAP="${FASTWAM_SKIP_PIP_BOOTSTRAP:-0}"
 FASTWAM_ALLOW_PYTHON_MINOR_MISMATCH="${FASTWAM_ALLOW_PYTHON_MINOR_MISMATCH:-0}"
@@ -318,17 +320,44 @@ esac
 
 patch_fastwam_video_backend_default
 
-prepare_custom_libero_data
-mkdir -p "$FASTWAM_WORKDIR/data"
-FASTWAM_LIBERO_LINK_TARGET="$FASTWAM_CUSTOM_LIBERO_DATA"
-if [[ "$FASTWAM_CUSTOM_LIBERO_DATA" == "$EMBODIED_REPO_ROOT"/data/custom/fastwam/libero-fastwam ]]; then
-  # Keep the symlink relative to the runnable FastWAM tree.  On multi-node
-  # clusters the same project may be mounted with different absolute prefixes
-  # on each node; an absolute symlink from node0 can be broken on node1.
-  FASTWAM_LIBERO_LINK_TARGET="../../../data/custom/fastwam/libero-fastwam"
+# Keep editable package metadata compatible with the platform-provided CUDA
+# stack.  Exact cu128 pins make `pip check` fail in the current cu130 image and
+# can cause a later editable reinstall to request an unintended downgrade.
+python - "$FASTWAM_WORKDIR/pyproject.toml" <<'PY'
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+text = path.read_text(encoding="utf-8")
+replacements = {
+    '"torch==2.7.1+cu128"': '"torch>=2.7.1,<2.12"',
+    '"torchcodec==0.5"': '"torchcodec>=0.5,<0.14"',
+    '"torchvision==0.22.1+cu128"': '"torchvision>=0.22.1,<0.27"',
+}
+for old, new in replacements.items():
+    if old in text:
+        text = text.replace(old, new, 1)
+    elif new not in text:
+        raise SystemExit(f"ERROR: unknown FastWAM platform dependency pin in {path}: {old}")
+path.write_text(text, encoding="utf-8")
+print(f"FastWAM platform dependency ranges ready: {path}")
+PY
+
+if [[ "$FASTWAM_PREPARE_LIBERO_DATA" == "1" ]]; then
+  prepare_custom_libero_data
+  mkdir -p "$FASTWAM_WORKDIR/data"
+  FASTWAM_LIBERO_LINK_TARGET="$FASTWAM_CUSTOM_LIBERO_DATA"
+  if [[ "$FASTWAM_CUSTOM_LIBERO_DATA" == "$EMBODIED_REPO_ROOT"/data/custom/fastwam/libero-fastwam ]]; then
+    # Keep the symlink relative to the runnable FastWAM tree.  On multi-node
+    # clusters the same project may be mounted with different absolute prefixes
+    # on each node; an absolute symlink from node0 can be broken on node1.
+    FASTWAM_LIBERO_LINK_TARGET="../../../data/custom/fastwam/libero-fastwam"
+  fi
+  ln -sfn "$FASTWAM_LIBERO_LINK_TARGET" "$FASTWAM_WORKDIR/data/libero_mujoco3.3.2"
+  echo "FastWAM LIBERO data linked: $FASTWAM_WORKDIR/data/libero_mujoco3.3.2 -> $FASTWAM_LIBERO_LINK_TARGET"
+else
+  echo "FASTWAM_PREPARE_LIBERO_DATA=0, skipped legacy LIBERO extraction and symlink."
 fi
-ln -sfn "$FASTWAM_LIBERO_LINK_TARGET" "$FASTWAM_WORKDIR/data/libero_mujoco3.3.2"
-echo "FastWAM LIBERO data linked: $FASTWAM_WORKDIR/data/libero_mujoco3.3.2 -> $FASTWAM_LIBERO_LINK_TARGET"
 
 if [[ "$FASTWAM_INSTALL" != "1" ]]; then
   if [[ "$FASTWAM_SOURCE_MODE" == "sync" ]]; then
@@ -415,6 +444,7 @@ fi
 
 FASTWAM_REQUIREMENTS_TMP="$(mktemp)"
 python - "$FASTWAM_WORKDIR/pyproject.toml" "$FASTWAM_REQUIREMENTS_TMP" <<'PY'
+import os
 import re
 import sys
 from pathlib import Path
@@ -435,11 +465,14 @@ for raw in pyproject.read_text(encoding="utf-8").splitlines():
         if match:
             dep = match.group(1)
             name = re.split(r"[<>=!~\\[]", dep, maxsplit=1)[0].lower()
-            if name not in {"torch", "torchvision"}:
+            platform_stack = {"torch", "torchvision"}
+            if os.environ.get("FASTWAM_SKIP_TORCH_INSTALL") == "1":
+                platform_stack.add("torchcodec")
+            if name not in platform_stack:
                 deps.append(dep)
 
 output.write_text("\n".join(deps) + "\n", encoding="utf-8")
-print(f"FastWAM dependency requirements without torch/torchvision: {output}")
+print(f"FastWAM dependency requirements without the reused platform stack: {output}")
 PY
 python -m pip install "${PIP_NETWORK_ARGS[@]}" "${PIP_INDEX_ARGS[@]}" -r "$FASTWAM_REQUIREMENTS_TMP"
 rm -f "$FASTWAM_REQUIREMENTS_TMP"

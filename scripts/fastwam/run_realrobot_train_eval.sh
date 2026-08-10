@@ -23,6 +23,15 @@ fi
 # shellcheck disable=SC1090
 source "$CONFIG_PATH"
 
+# A completed project full checkpoint can replace the release checkpoint as a
+# model-only source for warm_start/new_stage.  Exact resume remains a separate
+# Accelerator state-directory path.
+export FASTWAM_SOURCE_WEIGHTS="${FASTWAM_SOURCE_WEIGHTS:-}"
+if [[ -n "$FASTWAM_SOURCE_WEIGHTS" ]]; then
+  FASTWAM_RELEASE_CKPT="$FASTWAM_SOURCE_WEIGHTS"
+  export FASTWAM_RELEASE_CKPT
+fi
+
 resolve_task_name() {
   if [[ -n "${FASTWAM_TASK_NAME}" ]]; then
     echo "${FASTWAM_TASK_NAME}"
@@ -182,22 +191,39 @@ fi
 
 RUN_ID="${FASTWAM_RUN_ID:-$(date +%Y%m%d-%H%M%S)}"
 RUN_DIR="${FASTWAM_RUN_ROOT}/${FASTWAM_RUN_NAME}/${RUN_ID}"
-FASTWAM_NATIVE_OUTPUT_DIR="${FASTWAM_WORKDIR}/runs/${TASK_NAME}/${RUN_ID}"
+FASTWAM_CHECKPOINT_ROOT="${FASTWAM_CHECKPOINT_ROOT:-${EMBODIED_REPO_ROOT}/checkpoints/custom/fastwam}"
+FASTWAM_KEEP_LAST_N_CHECKPOINTS="${FASTWAM_KEEP_LAST_N_CHECKPOINTS:-3}"
+if [[ ! "${FASTWAM_KEEP_LAST_N_CHECKPOINTS}" =~ ^[0-9]+$ ]] || (( FASTWAM_KEEP_LAST_N_CHECKPOINTS < 1 )); then
+  echo "ERROR: FASTWAM_KEEP_LAST_N_CHECKPOINTS must be a positive integer, got ${FASTWAM_KEEP_LAST_N_CHECKPOINTS}" >&2
+  exit 2
+fi
+FASTWAM_TASK_CHECKPOINT_ROOT="${FASTWAM_CHECKPOINT_ROOT}/${TASK_NAME}"
+FASTWAM_NATIVE_OUTPUT_DIR="${FASTWAM_TASK_CHECKPOINT_ROOT}/${RUN_ID}"
 IS_MAIN_RANK=0
 if [[ "${FASTWAM_NODE_RANK}" == "0" ]]; then
   IS_MAIN_RANK=1
 fi
 
-if (( IS_MAIN_RANK == 1 )) && [[ -e "$RUN_DIR" && -z "${FASTWAM_RUN_ID:-}" ]]; then
-  echo "ERROR: run directory already exists: $RUN_DIR" >&2
+if (( IS_MAIN_RANK == 1 )) && [[ -e "$FASTWAM_NATIVE_OUTPUT_DIR" && -z "${FASTWAM_RESUME_STATE:-}" ]]; then
+  echo "ERROR: checkpoint run directory already exists: $FASTWAM_NATIVE_OUTPUT_DIR" >&2
+  echo "Choose a new FASTWAM_RUN_ID, or pass a full checkpoint with --resume-state/--resume-latest." >&2
   exit 2
 fi
 mkdir -p "$RUN_DIR"
 if (( IS_MAIN_RANK == 1 )); then
+  mkdir -p "$FASTWAM_TASK_CHECKPOINT_ROOT"
   cp "$CONFIG_PATH" "$RUN_DIR/config.sh"
 fi
 
-export PYTHONPATH="${FASTWAM_WORKDIR}/src:${PYTHONPATH:-}"
+if [[ -n "${FASTWAM_PYTHON_OVERLAY_SITE:-}" ]]; then
+  if [[ ! -d "$FASTWAM_PYTHON_OVERLAY_SITE" ]]; then
+    echo "ERROR: FASTWAM_PYTHON_OVERLAY_SITE is not a directory: $FASTWAM_PYTHON_OVERLAY_SITE" >&2
+    exit 2
+  fi
+  export PYTHONPATH="${FASTWAM_WORKDIR}/src:${FASTWAM_PYTHON_OVERLAY_SITE}:${PYTHONPATH:-}"
+else
+  export PYTHONPATH="${FASTWAM_WORKDIR}/src:${PYTHONPATH:-}"
+fi
 export DIFFSYNTH_MODEL_BASE_PATH="${FASTWAM_MODEL_BASE}"
 export DIFFSYNTH_SKIP_DOWNLOAD="${DIFFSYNTH_SKIP_DOWNLOAD:-true}"
 export TOKENIZERS_PARALLELISM="${TOKENIZERS_PARALLELISM:-false}"
@@ -207,6 +233,53 @@ export NCCL_DEBUG="${FASTWAM_NCCL_DEBUG:-WARN}"
 export MASTER_ADDR="${FASTWAM_MASTER_ADDR}"
 export MASTER_PORT="${FASTWAM_MASTER_PORT}"
 export RUN_ID
+# Both memory-saving paths are explicit experiment switches.  Their default is
+# the pinned upstream behavior; Behavior-1K enables them because the 5B fp32
+# host construction and full-state save do not fit a 16 GB CPU cgroup.
+export FASTWAM_DIRECT_CUDA_LOAD="${FASTWAM_DIRECT_CUDA_LOAD:-0}"
+export FASTWAM_LOW_MEMORY_CHECKPOINT="${FASTWAM_LOW_MEMORY_CHECKPOINT:-0}"
+export FASTWAM_RESUME_STATE="${FASTWAM_RESUME_STATE:-}"
+export FASTWAM_CONTINUATION_MODE="${FASTWAM_CONTINUATION_MODE:-legacy}"
+export FASTWAM_COMPATIBILITY_CONTRACT_SHA256="${FASTWAM_COMPATIBILITY_CONTRACT_SHA256:-}"
+export FASTWAM_SOURCE_CHECKPOINT_SHA256="${FASTWAM_SOURCE_CHECKPOINT_SHA256:-}"
+export FASTWAM_GLOBAL_BATCH_SIZE="${FASTWAM_GLOBAL_BATCH_SIZE:-0}"
+export FASTWAM_ZERO_STAGE="${FASTWAM_ZERO_STAGE:-1}"
+if [[ "${FASTWAM_ZERO_STAGE}" != "1" && "${FASTWAM_ZERO_STAGE}" != "2" ]]; then
+  echo "ERROR: FASTWAM_ZERO_STAGE must be 1 or 2, got ${FASTWAM_ZERO_STAGE}" >&2
+  exit 2
+fi
+require_file \
+  "$FASTWAM_WORKDIR/scripts/accelerate_configs/accelerate_zero${FASTWAM_ZERO_STAGE}_ds.yaml" \
+  "Accelerate ZeRO-${FASTWAM_ZERO_STAGE} config"
+export FASTWAM_CHECKPOINT_ROOT FASTWAM_KEEP_LAST_N_CHECKPOINTS FASTWAM_ZERO_STAGE
+if truthy_or_auto "$FASTWAM_LOW_MEMORY_CHECKPOINT"; then
+  FASTWAM_CHECKPOINT_MODE="delta"
+else
+  FASTWAM_CHECKPOINT_MODE="full"
+fi
+export FASTWAM_CHECKPOINT_MODE
+
+# Weight-only initialization is hashed once by rank 0.  Other nodes wait for a
+# path/size/mtime-specific marker instead of rereading a multi-GB checkpoint.
+if [[ -z "$FASTWAM_RESUME_STATE" && "$FASTWAM_INIT" == "release" && "$FASTWAM_RECIPE" != "v6_scratch" ]]; then
+  source_identity="$(stat -c '%n:%s:%Y' "$FASTWAM_RELEASE_CKPT")"
+  source_identity_sha256="$(printf '%s' "$source_identity" | sha256sum | awk '{print $1}')"
+  SOURCE_CHECKSUM_MARKER="$RUN_DIR/source_checkpoint.${source_identity_sha256}.sha256.ok"
+  if (( IS_MAIN_RANK == 1 )); then
+    actual_source_sha256="$(sha256sum "$FASTWAM_RELEASE_CKPT" | awk '{print $1}')"
+    if [[ -n "$FASTWAM_SOURCE_CHECKPOINT_SHA256" && "$actual_source_sha256" != "$FASTWAM_SOURCE_CHECKPOINT_SHA256" ]]; then
+      echo "ERROR: FastWAM source checkpoint SHA256 mismatch: expected=${FASTWAM_SOURCE_CHECKPOINT_SHA256} actual=${actual_source_sha256} path=${FASTWAM_RELEASE_CKPT}" >&2
+      exit 2
+    fi
+    printf '%s  %s\n' "$actual_source_sha256" "$FASTWAM_RELEASE_CKPT" > "$SOURCE_CHECKSUM_MARKER"
+  else
+    wait_for_file "$SOURCE_CHECKSUM_MARKER" "${FASTWAM_SOURCE_CHECKSUM_WAIT_TIMEOUT:-900}"
+    actual_source_sha256="$(awk 'NR == 1 {print $1}' "$SOURCE_CHECKSUM_MARKER")"
+  fi
+  FASTWAM_SOURCE_CHECKPOINT_SHA256="$actual_source_sha256"
+  export FASTWAM_SOURCE_CHECKPOINT_SHA256
+  echo "FASTWAM_SOURCE_CHECKPOINT_VERIFIED ${actual_source_sha256}"
+fi
 
 # 默认绕开 torchcodec，避免当前集群缺 FFmpeg 动态库时每个 worker 都打印 traceback。
 # prepare_fastwam_overlay.sh 会给 generated FastWAM workspace 打一个很小的兼容补丁，
@@ -218,6 +291,8 @@ export LEROBOT_VIDEO_BACKEND="${LEROBOT_VIDEO_BACKEND:-$FASTWAM_VIDEO_BACKEND}"
 export XDG_CACHE_HOME="${FASTWAM_XDG_CACHE_HOME:-$EMBODIED_REPO_ROOT/.cache}"
 export TORCH_EXTENSIONS_DIR="${FASTWAM_TORCH_EXTENSIONS_DIR:-$EMBODIED_REPO_ROOT/.cache/torch_extensions/fastwam}"
 export TRITON_CACHE_DIR="${FASTWAM_TRITON_CACHE_DIR:-$EMBODIED_REPO_ROOT/.cache/triton/fastwam}"
+# Training ranks override this to private node-local directories in train.py.
+export FASTWAM_TRITON_CACHE_BASE="${FASTWAM_TRITON_CACHE_BASE:-/tmp/fastwam-triton/${RUN_ID}}"
 
 # HuggingFace datasets parquet -> Arrow cache should not be shared across
 # nodes on PFS/NFS. File locks and *.incomplete directories are unreliable
@@ -278,6 +353,29 @@ case "${FASTWAM_INIT}" in
     ;;
 esac
 
+if [[ -n "$FASTWAM_RESUME_STATE" ]]; then
+  if truthy_or_auto "$FASTWAM_LOW_MEMORY_CHECKPOINT"; then
+    echo "ERROR: FASTWAM_RESUME_STATE requires FASTWAM_LOW_MEMORY_CHECKPOINT=0" >&2
+    exit 2
+  fi
+  require_file "$FASTWAM_RESUME_STATE" "FastWAM full training-state directory"
+  require_file "$FASTWAM_RESUME_STATE/trainer_state.json" "FastWAM trainer state"
+  RESUME_VALIDATE_ARGS=(--state "$FASTWAM_RESUME_STATE")
+  if [[ -n "$FASTWAM_COMPATIBILITY_CONTRACT_SHA256" ]]; then
+    RESUME_VALIDATE_ARGS+=(
+      --expected-contract-sha256 "$FASTWAM_COMPATIBILITY_CONTRACT_SHA256"
+    )
+  fi
+  if ! truthy_or_auto "${FASTWAM_STRICT_RESUME_COMPATIBILITY:-true}"; then
+    RESUME_VALIDATE_ARGS+=(--no-strict-compatibility)
+  fi
+  if truthy_or_auto "${FASTWAM_ALLOW_LEGACY_RESUME_STATE:-false}"; then
+    RESUME_VALIDATE_ARGS+=(--allow-legacy-state)
+  fi
+  python scripts/fastwam/checkpoint_manager.py validate "${RESUME_VALIDATE_ARGS[@]}"
+  MODEL_ARGS+=("resume=${FASTWAM_RESUME_STATE}")
+fi
+
 if [[ -n "${FASTWAM_PIN_STATS}" ]]; then
   MODEL_ARGS+=("data.train.pretrained_norm_stats=${FASTWAM_PIN_STATS}")
 fi
@@ -286,36 +384,37 @@ case "${FASTWAM_MODE}" in
   smoke)
     RUN_ARGS=(
       "max_steps=${FASTWAM_SMOKE_MAX_STEPS}"
-      log_every=1
+      "log_every=${FASTWAM_SMOKE_LOG_EVERY:-1}"
       save_every=1
-      eval_every=0
+      "eval_every=${FASTWAM_SMOKE_EVAL_EVERY:-0}"
       num_epochs=1
       "batch_size=${FASTWAM_SMOKE_BATCH_SIZE}"
       "num_workers=${FASTWAM_SMOKE_NUM_WORKERS}"
-      gradient_accumulation_steps=1
+      "gradient_accumulation_steps=${FASTWAM_SMOKE_GRADIENT_ACCUMULATION_STEPS:-1}"
     )
     ;;
   pilot)
     RUN_ARGS=(
       "max_steps=${FASTWAM_PILOT_MAX_STEPS}"
-      log_every=5
+      "log_every=${FASTWAM_PILOT_LOG_EVERY:-5}"
       "save_every=${FASTWAM_PILOT_SAVE_EVERY}"
-      eval_every=0
+      "eval_every=${FASTWAM_PILOT_EVAL_EVERY:-0}"
       num_epochs=1
       "batch_size=${FASTWAM_PILOT_BATCH_SIZE}"
       "num_workers=${FASTWAM_PILOT_NUM_WORKERS}"
-      gradient_accumulation_steps=1
+      "gradient_accumulation_steps=${FASTWAM_PILOT_GRADIENT_ACCUMULATION_STEPS:-1}"
     )
     ;;
   full)
     RUN_ARGS=(
-      max_steps=null
-      log_every=10
+      "max_steps=${FASTWAM_FULL_MAX_STEPS:-null}"
+      "log_every=${FASTWAM_FULL_LOG_EVERY:-10}"
       "save_every=${FASTWAM_FULL_SAVE_EVERY}"
-      eval_every=0
+      "eval_every=${FASTWAM_FULL_EVAL_EVERY:-0}"
       "num_epochs=${FASTWAM_FULL_NUM_EPOCHS}"
       "batch_size=${FASTWAM_FULL_BATCH_SIZE}"
       "num_workers=${FASTWAM_FULL_NUM_WORKERS}"
+      "gradient_accumulation_steps=${FASTWAM_FULL_GRADIENT_ACCUMULATION_STEPS:-1}"
     )
     ;;
   *)
@@ -323,6 +422,7 @@ case "${FASTWAM_MODE}" in
     exit 2
     ;;
 esac
+RUN_ARGS+=("keep_last_n_checkpoints=${FASTWAM_KEEP_LAST_N_CHECKPOINTS}")
 
 if [[ -n "${FASTWAM_EXTRA_OVERRIDES}" ]]; then
   # shellcheck disable=SC2206
@@ -351,7 +451,16 @@ fi
 # 然后传给 accelerate。因此这里传 GPUS_PER_NODE=8 是正确的；
 # 不要像 LeRobot 顶层 accelerate wrapper 那样改成全局总进程数。
 TOTAL_PROCESSES=$(( GPUS_PER_NODE * FASTWAM_NNODES ))
-CMD=(bash scripts/train_zero1.sh "$GPUS_PER_NODE" "${MODEL_ARGS[@]}" "${RUN_ARGS[@]}" "${EXTRA_ARGS[@]}")
+# output_dir is intentionally last: the pinned upstream launcher supplies its
+# own relative default, and Hydra's final override moves formal checkpoints out
+# of the generated source workspace into the project checkpoint root.
+CMD=(
+  bash scripts/train_zero1.sh "$GPUS_PER_NODE"
+  "${MODEL_ARGS[@]}"
+  "${RUN_ARGS[@]}"
+  "${EXTRA_ARGS[@]}"
+  "output_dir=${FASTWAM_NATIVE_OUTPUT_DIR}"
+)
 if (( IS_MAIN_RANK == 1 )); then
   printf "%q " "${CMD[@]}" > "$RUN_DIR/command.txt"
   PRECOMPUTE_CMD=(
@@ -379,6 +488,24 @@ manifest = {
     "run_dir": "${RUN_DIR}",
     "fastwam_workdir": "${FASTWAM_WORKDIR}",
     "fastwam_native_output_dir": "${FASTWAM_NATIVE_OUTPUT_DIR}",
+    "checkpoint_root": "${FASTWAM_CHECKPOINT_ROOT}",
+    "keep_last_n_checkpoints": int("${FASTWAM_KEEP_LAST_N_CHECKPOINTS}"),
+    "checkpoint_mode": "${FASTWAM_CHECKPOINT_MODE}",
+    "continuation_mode": "${FASTWAM_CONTINUATION_MODE}",
+    "source_checkpoint_sha256": "${FASTWAM_SOURCE_CHECKPOINT_SHA256}",
+    "source_weights_checkpoint": "${FASTWAM_SOURCE_WEIGHTS}",
+    "source_global_step": int("${FASTWAM_SOURCE_GLOBAL_STEP:-0}"),
+    "stage_max_steps": "${FASTWAM_STAGE_MAX_STEPS:-}",
+    "target_global_step": "${FASTWAM_TARGET_GLOBAL_STEP:-}",
+    "compatibility_contract_sha256": "${FASTWAM_COMPATIBILITY_CONTRACT_SHA256}",
+    "runtime_source_sha256": "${FASTWAM_RUNTIME_SOURCE_SHA256:-}",
+    "run_contract_path": "${FASTWAM_RUN_CONTRACT_PATH:-}",
+    "global_batch_size": int("${FASTWAM_GLOBAL_BATCH_SIZE}"),
+    "dataset_root": "${FASTWAM_DATASET_ROOT:-}",
+    "dataset_fingerprint": "${FASTWAM_DATASET_FINGERPRINT:-}",
+    "episode_selection_sha256": "${FASTWAM_EPISODE_SELECTION_SHA256:-}",
+    "normalization_stats_sha256": "${FASTWAM_NORM_STATS_SHA256:-}",
+    "text_embedding_sha256": "${FASTWAM_TEXT_EMBEDDING_SHA256:-}",
     "official_repo": "${FASTWAM_OFFICIAL_REPO}",
     "official_ref": "${FASTWAM_OFFICIAL_REF}",
     "overlay_repo": "${FASTWAM_OVERLAY_REPO}",
@@ -388,10 +515,14 @@ manifest = {
     "total_processes": int("${TOTAL_PROCESSES}"),
     "node_rank": int("${FASTWAM_NODE_RANK}"),
     "mixed_precision": "${FASTWAM_MIXED_PRECISION}",
+    "direct_cuda_load": "${FASTWAM_DIRECT_CUDA_LOAD}",
+    "low_memory_checkpoint": "${FASTWAM_LOW_MEMORY_CHECKPOINT}",
+    "resume_state": "${FASTWAM_RESUME_STATE}",
     "init": "${FASTWAM_INIT}",
     "model_id": "${FASTWAM_MODEL_ID}",
     "redirect_common_files": "${FASTWAM_REDIRECT_COMMON_FILES}",
     "video_backend": "${FASTWAM_VIDEO_BACKEND}",
+    "v3_shard_cache_size": int("${FASTWAM_V3_SHARD_CACHE_SIZE:-3}"),
     "lerobot_video_backend": "${LEROBOT_VIDEO_BACKEND}",
     "torch_extensions_dir": "${TORCH_EXTENSIONS_DIR}",
     "triton_cache_dir": "${TRITON_CACHE_DIR}",
@@ -413,7 +544,7 @@ PY
 fi
 
 echo "FASTWAM_TRAIN_START task=${TASK_NAME} mode=${FASTWAM_MODE} recipe=${FASTWAM_RECIPE} run_dir=${RUN_DIR}"
-echo "FASTWAM_DISTRIBUTED_TOPOLOGY nproc_per_node=${GPUS_PER_NODE} nnodes=${FASTWAM_NNODES} total_processes=${TOTAL_PROCESSES} node_rank=${FASTWAM_NODE_RANK}"
+echo "FASTWAM_DISTRIBUTED_TOPOLOGY nproc_per_node=${GPUS_PER_NODE} nnodes=${FASTWAM_NNODES} total_processes=${TOTAL_PROCESSES} node_rank=${FASTWAM_NODE_RANK} zero_stage=${FASTWAM_ZERO_STAGE}"
 
 TEXT_EMBED_MARKER="$RUN_DIR/precompute_text_embeds.done"
 TEXT_EMBED_LOG="$RUN_DIR/precompute_text_embeds.log"
@@ -465,6 +596,19 @@ if (( IS_MAIN_RANK == 1 )); then
     echo "FASTWAM_LOSS_REPORT $RUN_DIR/loss_summary.json"
   else
     echo "WARNING: FastWAM loss parser did not find complete train records in $RUN_DIR/train_stdout.log" >&2
+  fi
+
+  if ! python scripts/fastwam/checkpoint_manager.py index \
+      --native-run "$FASTWAM_NATIVE_OUTPUT_DIR" \
+      --task-root "$FASTWAM_TASK_CHECKPOINT_ROOT" \
+      --run-id "$RUN_ID" \
+      --checkpoint-mode "$FASTWAM_CHECKPOINT_MODE" \
+      --allow-empty; then
+    if (( train_status == 0 )); then
+      echo "ERROR: training completed but checkpoint indexing failed." >&2
+      exit 2
+    fi
+    echo "WARNING: checkpoint indexing also failed after training status ${train_status}." >&2
   fi
 fi
 

@@ -1,8 +1,7 @@
-PYTHON ?= python3.11
-VENV ?= .venv
+PYTHON ?= python
 CONSTRAINTS ?= requirements/constraints-py311.txt
 
-.PHONY: help setup doctor test validate prepare-dirs prepare-assets-lerobot prepare-lerobot-pi05-so100-assets prepare-assets-custom-fastwam prepare-sources-custom-fastwam prepare-env-custom-fastwam prepare-assets-imagewam check-assets check-assets-core check-assets-lerobot check-assets-custom-fastwam check-assets-imagewam download-lerobot-artifacts download-lerobot-pusht-dataset download-lerobot-svla-so100-pickplace-dataset augment-lerobot-svla-so100-quantile-stats download-lerobot-fastwam-libero-dataset convert-lerobot-fastwam-libero-v3 download-lerobot-fastwam-base-cache download-lerobot-diffusion-pusht-policy download-lerobot-smolvla-base-policy download-lerobot-pi05-base-policy download-lerobot-pi05-runtime-cache download-lerobot-fastwam-libero-policy download-data-rovid20k download-data-rovidx download-data-mdm-depth download-data-xperience10m-sample download-data-abc130k download-data-agibotworld-alpha download-data-interndata-a1 download-custom-fastwam-libero-dataset download-fastwam-artifacts prepare-imagewam-upstream download-imagewam-artifacts download-imagewam-flux2-base lerobot-check-scripts fastwam-check-scripts imagewam-check-scripts experiments-check-scripts lerobot-data-smoke schemas clean
+.PHONY: help setup doctor test validate prepare-dirs prepare-assets-lerobot prepare-lerobot-pi05-so100-assets prepare-assets-custom-fastwam prepare-sources-custom-fastwam prepare-env-custom-fastwam prepare-assets-imagewam check-assets check-assets-core check-assets-lerobot check-assets-lerobot-pi05 check-assets-custom-fastwam check-assets-imagewam download-lerobot-artifacts download-lerobot-pusht-dataset download-lerobot-svla-so100-pickplace-dataset augment-lerobot-svla-so100-quantile-stats download-lerobot-fastwam-libero-dataset convert-lerobot-fastwam-libero-v3 download-lerobot-fastwam-base-cache download-lerobot-diffusion-pusht-policy download-lerobot-smolvla-base-policy download-lerobot-pi05-base-policy download-lerobot-pi05-runtime-cache download-lerobot-fastwam-libero-policy download-data-rovid20k download-data-rovidx download-data-mdm-depth download-data-xperience10m-sample download-data-abc130k download-data-agibotworld-alpha download-data-interndata-a1 download-custom-fastwam-libero-dataset download-fastwam-artifacts prepare-imagewam-upstream download-imagewam-artifacts download-imagewam-flux2-base lerobot-check-scripts fastwam-check-scripts imagewam-check-scripts experiments-check-scripts lerobot-data-smoke schemas clean
 
 help:
 	@echo "EmbodiedAI Demo Pipeline"
@@ -10,7 +9,7 @@ help:
 	@echo "说明：make 只负责环境、下载、转换和检查；真实训练/推理请去 experiments/ 下执行 run.py 或 launch.sh。"
 	@echo
 	@echo "Environment / checks 环境和检查:"
-	@echo "  make setup                         创建本地 core .venv（不是 FastWAM/LeRobot 集群环境）"
+	@echo "  make setup                         把项目依赖安装到当前默认 Python（不创建虚拟环境）"
 	@echo "  make test                          运行单测"
 	@echo "  make validate                      检查脚本语法、parser 和 schema 导出"
 	@echo "  make lerobot-check-scripts         Check LeRobot wrapper syntax/parsers"
@@ -19,6 +18,7 @@ help:
 	@echo "  make experiments-check-scripts     Check experiment launch/config scripts"
 	@echo "  make prepare-dirs                  Create repo-local asset directories"
 	@echo "  make check-assets                  Check repo-local data/model/cache assets"
+	@echo "  make check-assets-lerobot-pi05     Check the complete pi05 base + PaliGemma runtime set"
 	@echo
 	@echo "Bootstrap 资产和环境准备:"
 	@echo "  make prepare-assets-lerobot        下载第一批 LeRobot 数据、policy 和 base cache"
@@ -26,7 +26,7 @@ help:
 	@echo "                                      准备 pi05/SO100 训练所需数据、权重、runtime cache 和本地 q01/q99 stats"
 	@echo "  make prepare-assets-custom-fastwam 下载 custom FastWAM 数据、release ckpt、Wan runtime assets 并准备 overlay"
 	@echo "  make prepare-sources-custom-fastwam 在有网络节点同步 FastWAM 官方源码和 overlay"
-	@echo "  make prepare-env-custom-fastwam    创建/安装 custom FastWAM conda 环境（不要在无网计算节点跑）"
+	@echo "  make prepare-env-custom-fastwam    把 custom FastWAM 依赖安装到当前默认 Python"
 	@echo "  make prepare-assets-imagewam       准备 ImageWAM upstream 和模型资产（候选路线）"
 	@echo
 	@echo "LeRobot downloads:"
@@ -78,15 +78,13 @@ help:
 	@echo "  experiments/README.md"
 
 setup:
-	$(PYTHON) -m venv $(VENV)
-	$(VENV)/bin/python -m pip install --upgrade pip
-	$(VENV)/bin/python -m pip install -c $(CONSTRAINTS) -e ".[dev]"
+	$(PYTHON) -m pip install -c $(CONSTRAINTS) -e ".[dev,behavior1k]"
 
 doctor:
-	VENV=$(VENV) PYTHON_BIN=$(PYTHON) bash scripts/doctor.sh
+	PYTHON_BIN=$(PYTHON) bash scripts/doctor.sh
 
 test:
-	$(VENV)/bin/python -m pytest
+	$(PYTHON) -m pytest
 
 validate:
 	$(MAKE) lerobot-check-scripts
@@ -124,7 +122,7 @@ prepare-sources-custom-fastwam: prepare-dirs
 	FASTWAM_SOURCE_MODE=sync bash scripts/fastwam/prepare_fastwam_overlay.sh
 
 prepare-env-custom-fastwam: prepare-dirs
-	FASTWAM_SOURCE_MODE="$${FASTWAM_SOURCE_MODE:-reuse}" FASTWAM_CREATE_CONDA=1 FASTWAM_INSTALL=1 bash scripts/fastwam/prepare_fastwam_overlay.sh
+	FASTWAM_SOURCE_MODE="$${FASTWAM_SOURCE_MODE:-reuse}" FASTWAM_CREATE_CONDA=0 FASTWAM_INSTALL=1 FASTWAM_SKIP_TORCH_INSTALL=1 FASTWAM_INSTALL_NVCC=0 bash scripts/fastwam/prepare_fastwam_overlay.sh
 
 prepare-assets-imagewam: prepare-dirs
 	$(MAKE) prepare-imagewam-upstream
@@ -139,6 +137,9 @@ check-assets-core:
 
 check-assets-lerobot:
 	$(PYTHON) scripts/check_assets.py --profile lerobot
+
+check-assets-lerobot-pi05:
+	$(PYTHON) scripts/check_assets.py --profile lerobot-pi05
 
 check-assets-custom-fastwam:
 	$(PYTHON) scripts/check_assets.py --profile custom-fastwam
@@ -201,6 +202,7 @@ download-lerobot-pi05-base-policy:
 	ARTIFACT_MANIFEST_NAME=lerobot_pi05_base_policy_manifest.json \
 	LEROBOT_POLICY_TYPE=pi05 \
 	LEROBOT_POLICY_REPO_ID=lerobot/pi05_base \
+	LEROBOT_POLICY_REVISION=b211f3d44c36b6acfcf7ae94a64e8e96f75a64ba \
 	LEROBOT_POLICY_LOCAL_DIR="$${EMBODIED_MODEL_ROOT:-$$(pwd)/models}/lerobot/pi05/pi05_base" \
 	bash scripts/lerobot/download_artifacts.sh
 
@@ -209,10 +211,15 @@ download-lerobot-pi05-runtime-cache:
 	HUGGINGFACE_HUB_CACHE="$${HUGGINGFACE_HUB_CACHE:-$$(pwd)/hf_cache/hub}" \
 	HF_HUB_DISABLE_XET="$${HF_HUB_DISABLE_XET:-1}" \
 	hf download google/paligemma-3b-pt-224 \
+	  --revision 35e4f46485b4d07967e7e9935bc3786aad50687c \
 	  --include "config.json" \
 	  --include "tokenizer*" \
 	  --include "special_tokens_map.json" \
 	  --include "added_tokens.json"
+	@CACHE_ROOT="$${HUGGINGFACE_HUB_CACHE:-$${HF_HOME:-$$(pwd)/hf_cache}/hub}/models--google--paligemma-3b-pt-224"; \
+	mkdir -p "$$CACHE_ROOT/refs"; \
+	printf "%s" "35e4f46485b4d07967e7e9935bc3786aad50687c" > "$$CACHE_ROOT/refs/main"; \
+	echo "[cache-ref] $$CACHE_ROOT/refs/main"
 
 download-lerobot-fastwam-libero-policy:
 	DOWNLOAD_LEROBOT_DATASET=0 DOWNLOAD_LEROBOT_POLICY=1 \

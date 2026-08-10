@@ -1,5 +1,5 @@
 schema_version: "1.0"
-updated: "2026-07-15"
+updated: "2026-07-30"
 # 数据注册表：用于说明“哪些数据放在哪里、给哪条 pipeline 用、当前是否适合下载”。
 # 这不是论文综述，也不是自动下载清单；真正下载入口仍以 Makefile target 为准。
 purpose: >
@@ -13,6 +13,31 @@ storage:
     or environment variables; do not copy datasets into pipeline directories.
 
 tiers:
+  behavior1k_2026_posttraining:
+    description: Canonical dataset for the current post-training and closed-loop evaluation work.
+    datasets:
+      - id: behavior-1k/2026-challenge-demos
+        local_dir: external_via_BEHAVIOR1K_DATA_ROOT
+        format: LeRobot v3
+        revision: 2add61313bac4f1a42363d00ad03bd45949941a8
+        scale:
+          tasks: 100
+          episodes: 20000
+          frames: 210916774
+          data_parquet_files: 955
+          video_files: 17093
+        use_for:
+          - LeRobot pi05 post-training
+          - custom FastWAM post-training
+          - BEHAVIOR-1K 2026 closed-loop evaluation
+        status: external_mount_required
+        config: configs/behavior1k/dataset_2026.yaml
+        notes:
+          - Keep the 3 TB source immutable and do not copy it into a pipeline.
+          - Select episodes through meta/episodes mappings; never infer shards from raw_episode_id.
+          - The default policy view uses three RGB cameras and projects raw state 61D to policy state 23D.
+          - Depth remains available but is not decoded during the first training milestone.
+
   # 第一优先级：能马上支持 loss/inference 检查的小数据或已验证数据。
   immediate_training:
     description: Small or already validated assets for first loss/inference checks.

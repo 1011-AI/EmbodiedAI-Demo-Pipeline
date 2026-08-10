@@ -1,0 +1,136 @@
+# BEHAVIOR-1K Task 0 的 LeRobot / PyTorch π0.5 真实后训练与离线推理配置。
+#
+# 先生成零拷贝视图和 23D stats，再检查命令：
+#   python experiments/lerobot/pi05_behavior1k_task0/run.py --dry-run
+#
+# 检查数据、权重、CUDA 和进程数，但不启动训练：
+#   python experiments/lerobot/pi05_behavior1k_task0/run.py --profile smoke --preflight
+#
+# 启动真实训练：
+#   python experiments/lerobot/pi05_behavior1k_task0/run.py --profile smoke
+#
+# 使用 checkpoint 做真实离线推理：
+#   python experiments/lerobot/pi05_behavior1k_task0/run.py --mode infer
+
+schema_version: "1.0"
+backend: lerobot
+
+experiment:
+  name: pi05_behavior1k_task0
+  # 默认使用已经在 8×A800 80 GB / 64 CPU 核上验证的吞吐 profile。
+  # 单卡检查使用 run.py --profile smoke，不要手改下面的实测值。
+  profile: a800_8gpu
+  # 留空时每次运行自动生成时间戳；需要稳定续跑时显式填写。
+  run_id:
+
+paths:
+  # `embodied-demo behavior1k-prepare-view` 的输出。只包含 manifest 与 stats，
+  # 不复制 3 TB 原始视频/Parquet。
+  view_dir: data/behavior1k/views/r1pro_policy23/turning_on_radio
+
+  # LeRobot/PyTorch π0.5 权重。不能填写 OpenPI/JAX checkpoint。
+  pretrained_path: models/lerobot/pi05/pi05_base
+
+  # 训练和推理产物均落到项目 runs/ 下，不写原始数据目录。
+  run_root: runs/experiments/lerobot/pi05_behavior1k_task0
+
+dataset:
+  repo_id: behavior-1k/2026-challenge-demos
+  video_backend: pyav
+  eval_split: 0.0
+  # OpenPI 的 BEHAVIOR-1K loader 使用 5e-4 秒。30 FPS 时间戳写入 Parquet
+  # 后存在约 1e-4 秒的浮点舍入误差；LeRobot 默认 1e-4 会误报不同步。
+  tolerance_s: 0.0005
+
+policy:
+  type: pi05
+  repo_id: local/pi05_behavior1k_task0
+  device: cuda
+  dtype: bfloat16
+
+  # Behavior/OpenPI 参考 action horizon 为 32。
+  chunk_size: 32
+  n_action_steps: 32
+
+  # R1Pro action 混合了 base velocity、绝对关节位置和 gripper command。
+  # 第一版严禁对全部 23D 隐式做 relative action。
+  use_relative_actions: false
+
+  # 短探针关闭 compile，避免首次编译时间掩盖真实数据/模型错误。
+  compile_model: false
+  # 由 experiment.profile 选择：a800_8gpu=false，smoke=true。
+  # 采用 action expert 后训练；PaliGemma VLM 冻结但仍参与前向，训练的是真实
+  # π0.5 action expert，不是 mock。
+  train_expert_only: true
+  push_to_hub: false
+
+training:
+  # 默认是可观察 loss 的最短真实后训练探针。one-batch overfit 时可把 view
+  # 收窄到一个 episode，并将 steps 提高到 20-100。
+  steps: 2
+  # batch_size / num_workers 由 profile 固定，避免口头约定与真实命令漂移。
+  prefetch_factor: 2
+  log_freq: 1
+
+  save_checkpoint: true
+  save_freq: 2
+  seed: 1005
+  wandb: false
+
+distributed:
+  # 本地进程数由 profile 固定；仍可用 --num-processes 做一次性显式覆盖。
+  mixed_precision: bf16
+
+  # 当前入口同时支持平台向每个节点注入这些参数。单机无需修改。
+  num_machines: 1
+  machine_rank: 0
+  main_process_ip: 127.0.0.1
+  main_process_port: 29505
+
+# 同一份 Behavior1K 配置里保留两个明确 profile，不再复制第二份 YAML。
+# 只有这些已声明字段可被 profile 覆盖；run.py 会对拼写错误直接报错。
+profiles:
+  a800_8gpu:
+    policy:
+      gradient_checkpointing: false
+    training:
+      # 8×A800 的实测安全甜点：每 GPU batch=16，全局 batch=128。
+      # batch=20 虽可达到约 126 samples/s，但设备占用接近 80.7/81.9 GB，
+      # 不保留长训所需的显存余量。
+      batch_size: 16
+      num_workers: 4
+      persistent_workers: true
+    distributed:
+      num_processes: 8
+
+  smoke:
+    policy:
+      gradient_checkpointing: true
+    training:
+      batch_size: 1
+      num_workers: 0
+      # PyTorch DataLoader 在 num_workers=0 时不能启用常驻 worker。
+      persistent_workers: false
+    distributed:
+      num_processes: 1
+
+inference:
+  # 默认可直接用 base 做链路检查。训练后改为：
+  # runs/.../lerobot_output/checkpoints/<step>/pretrained_model
+  checkpoint: models/lerobot/pi05/pi05_base
+  sample_index: 0
+  num_inference_steps: 10
+
+runtime:
+  offline: true
+  hf_home: hf_cache
+  nccl_debug: WARN
+
+  # LeRobot 0.6.1 默认先在 CPU 构造模型并把 14 GB safetensors 读到 CPU，
+  # 容器内存限制较小时会在使用 GPU 前被 OOM kill。开启后，模型参数和权重
+  # 直接落到 Accelerate 为当前 rank 选择的 CUDA device；不修改上游源码。
+  direct_cuda_load: true
+
+  # 只保存 train_expert_only 的真实可训练参数，并在推理时叠加到固定 base。
+  # 这是可推理 checkpoint，不包含 optimizer/RNG，不能用于断点续训。
+  delta_checkpoint: true

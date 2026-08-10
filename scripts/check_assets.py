@@ -15,6 +15,7 @@ class Asset:
     path: str
     kind: str = "dir_nonempty"
     required: bool = True
+    expected: str | None = None
 
 
 @dataclass
@@ -76,9 +77,47 @@ ASSETS: tuple[Asset, ...] = (
     Asset("imagewam", "ImageWAM upstream", "upstreams/ImageWAM"),
     Asset("imagewam", "ImageWAM FLUX.2 4B LIBERO checkpoint", "models/custom/imagewam/flux2_klein_4b_libero"),
     Asset("imagewam", "ImageWAM FLUX.2 base", "models/custom/imagewam/flux2"),
+    Asset(
+        "lerobot-pi05",
+        "pi05 policy config",
+        "models/lerobot/pi05/pi05_base/config.json",
+        "file_nonempty",
+    ),
+    Asset(
+        "lerobot-pi05",
+        "pi05 policy weights",
+        "models/lerobot/pi05/pi05_base/model.safetensors",
+        "file_nonempty",
+    ),
+    Asset(
+        "lerobot-pi05",
+        "PaliGemma config cache",
+        "hf_cache/hub/models--google--paligemma-3b-pt-224/snapshots/35e4f46485b4d07967e7e9935bc3786aad50687c/config.json",
+        "file_nonempty",
+    ),
+    Asset(
+        "lerobot-pi05",
+        "PaliGemma tokenizer config cache",
+        "hf_cache/hub/models--google--paligemma-3b-pt-224/snapshots/35e4f46485b4d07967e7e9935bc3786aad50687c/tokenizer_config.json",
+        "file_nonempty",
+    ),
+    Asset(
+        "lerobot-pi05",
+        "PaliGemma tokenizer cache",
+        "hf_cache/hub/models--google--paligemma-3b-pt-224/snapshots/35e4f46485b4d07967e7e9935bc3786aad50687c/tokenizer.json",
+        "file_nonempty",
+    ),
+    Asset(
+        "lerobot-pi05",
+        "PaliGemma main revision cache ref",
+        "hf_cache/hub/models--google--paligemma-3b-pt-224/refs/main",
+        "file_content",
+        True,
+        "35e4f46485b4d07967e7e9935bc3786aad50687c",
+    ),
 )
 
-PROFILE_ORDER = ("core", "lerobot", "custom-fastwam", "imagewam")
+PROFILE_ORDER = ("core", "lerobot", "lerobot-pi05", "custom-fastwam", "imagewam")
 
 
 def _has_children(path: Path) -> bool:
@@ -91,6 +130,32 @@ def check_asset(root: Path, asset: Asset) -> AssetStatus:
         ok = path.is_file()
         status = "ok" if ok else "missing"
         detail = "file exists" if ok else "file not found"
+    elif asset.kind == "file_nonempty":
+        ok = path.is_file() and path.stat().st_size > 0
+        status = "ok" if ok else "missing"
+        detail = (
+            f"file exists ({path.stat().st_size} bytes)"
+            if ok
+            else "non-empty file not found"
+        )
+    elif asset.kind == "file_content":
+        actual = path.read_text(encoding="utf-8") if path.is_file() else None
+        ok = actual == asset.expected
+        status = "ok" if ok else "missing"
+        detail = (
+            "file content matches"
+            if ok
+            else f"expected exact content {asset.expected!r}, got {actual!r}"
+        )
+    elif asset.kind == "glob_file":
+        matches = sorted(item for item in root.glob(asset.path) if item.is_file())
+        ok = bool(matches)
+        status = "ok" if ok else "missing"
+        detail = (
+            f"matched {len(matches)} file(s); first={matches[0]}"
+            if ok
+            else "no matching file found"
+        )
     elif asset.kind == "dir":
         ok = path.is_dir()
         status = "ok" if ok else "missing"
@@ -151,7 +216,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--root", type=Path, default=Path.cwd())
     parser.add_argument(
         "--profile",
-        choices=("core", "lerobot", "custom-fastwam", "imagewam", "all"),
+        choices=("core", "lerobot", "lerobot-pi05", "custom-fastwam", "imagewam", "all"),
         default="all",
     )
     parser.add_argument("--json", action="store_true", help="print machine-readable JSON")

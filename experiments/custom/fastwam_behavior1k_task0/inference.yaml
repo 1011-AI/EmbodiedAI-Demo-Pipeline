@@ -1,0 +1,75 @@
+# FastWAM + BEHAVIOR-1K Task 0 真实 checkpoint 推理与 policy server 配置。
+#
+# 最短用法（不手写模型参数）：
+#   export FASTWAM_NATIVE_RUN_DIR=/path/to/EmbodiedAI-Demo-Pipeline/checkpoints/custom/fastwam/behavior1k_task0_action_only/<run_id>
+#   python experiments/custom/fastwam_behavior1k_task0/infer.py --dry-run
+#   python experiments/custom/fastwam_behavior1k_task0/infer.py
+#
+# 启动官方 evaluator 可连接的 WebSocket server：
+#   python experiments/custom/fastwam_behavior1k_task0/infer.py --mode serve
+#
+# native run 必须来自本项目的真实 FastWAM 后训练，包含：
+# config.yaml、dataset_stats.json、checkpoints/weights/step_*.pt。
+
+backend: fastwam
+# 这三项必须与数据集 meta/tasks.jsonl 的同一行完全一致。尤其不能把下面
+# 的完整英文 task_instruction 换成 turning_on_radio slug，否则 T5 cache hash
+# 与训练时不一致，入口会在加载 5B 模型前直接拒绝。
+task_index: 0
+task_name: turning_on_radio
+task_instruction: Turn on the radio receiver that's on the table in the living room.
+
+paths:
+  # 公共 YAML 不写死集群 run。优先读取 FASTWAM_NATIVE_RUN_DIR。
+  native_run_dir:
+  native_run_dir_env: FASTWAM_NATIVE_RUN_DIR
+
+  # 留空时选择 native run 中 step 最大的 checkpoint。
+  # 临时指定可设置 FASTWAM_CHECKPOINT=/absolute/path/step_xxxxxx.pt。
+  checkpoint:
+  checkpoint_env: FASTWAM_CHECKPOINT
+
+  # action/proprio delta 的基础权重。推理必须先恢复 release/base，再覆盖 delta；
+  # 否则 native config 的 skip_dit_load_from_pretrain 会留下随机 video expert。
+  base_checkpoint: models/custom/fastwam/release/libero_uncond_2cam224.pt
+  base_checkpoint_env: FASTWAM_BASE_CHECKPOINT
+
+  # 固定 official FastWAM + realrobot overlay 生成的真实运行树。
+  source_root: upstreams/FastWAM-realrobot
+  source_root_env: FASTWAM_SOURCE_ROOT
+
+  # DiffSynth 的本地 Wan VAE/T5/tokenizer 根目录。GPU 节点离线，入口会据此
+  # 设置 DIFFSYNTH_MODEL_BASE_PATH，并强制 DIFFSYNTH_SKIP_DOWNLOAD=true。
+  model_base: models
+
+  # 推理证据、checkpoint load report 都写到这里；不会写入原数据集。
+  output_dir: runs/experiments/custom/fastwam_behavior1k_task0/inference
+
+inference:
+  # offline：从 native config 的真实 LeRobotDataset 取一条样本做 checkpoint 推理。
+  # serve：接收 BEHAVIOR evaluator 的三路 RGB + 61D state。
+  mode: offline
+  sample_index: 0
+  device: cuda:0
+  require_cuda: true
+
+  # 与训练端同一 opt-in source patch。必须在构造 5B video expert 与加载
+  # release/delta checkpoint 前生效，否则小 CPU cgroup 会出现宿主内存峰值。
+  direct_cuda_load: true
+
+  # FastWAM 一次预测完整 action chunk；扩散步数必须与实验记录一起保存。
+  action_horizon: 32
+  num_inference_steps: 20
+  # 训练端将 z-score target 截断到 [-5,5]；推理反归一化前使用相同边界。
+  # 数据集 min/max 不是机器人物理限位，因此不拿它做输出硬裁剪。
+  normalized_action_clip: 5.0
+  seed: 42
+
+server:
+  host: 0.0.0.0
+  port: 8000
+
+  # evaluator 每 step 只接收一个 float32[23]。server 缓存模型给出的 32-step
+  # chunk，并最多执行前 16 步后重新规划。收到 {"reset": true} 时同时清空
+  # chunk cursor 和 FastWAM diffusion seed 序列，且不发送 reset ACK。
+  execution_horizon: 16

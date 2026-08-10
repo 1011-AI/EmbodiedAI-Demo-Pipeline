@@ -12,6 +12,7 @@ ssh 到 worker，也不需要用户在每台机器上手动执行命令。
 
 import argparse
 import os
+import re
 import shlex
 import socket
 import subprocess
@@ -26,6 +27,14 @@ except ImportError as exc:  # pragma: no cover - cluster-side error path.
 
 
 SUPPORTED_BACKENDS = {"lerobot", "fastwam"}
+PYTORCHJOB_ENV_NAMES = (
+    "MASTER_ADDR",
+    "MASTER_PORT",
+    "RANK",
+    "WORLD_SIZE",
+    "NPROC_PER_NODE",
+)
+FASTWAM_PROFILES = {"smoke", "pilot", "full"}
 
 
 def find_project_root(start: Path) -> Path:
@@ -69,6 +78,19 @@ def infer_nproc_per_node() -> int:
     raise SystemExit("ERROR: NPROC_PER_NODE is not set and torch.cuda.device_count() failed or returned 0")
 
 
+def require_pytorchjob_env() -> None:
+    missing = [name for name in PYTORCHJOB_ENV_NAMES if not os.environ.get(name, "").strip()]
+    if missing:
+        raise SystemExit(
+            "ERROR: missing required Baige PyTorchJob env: " + ", ".join(missing)
+        )
+
+
+def safe_run_id_component(value: str) -> str:
+    normalized = re.sub(r"[^A-Za-z0-9_.-]+", "-", value.strip()).strip("-._")
+    return normalized or "baige-job"
+
+
 def experiment_name(config: dict[str, Any], config_path: Path) -> str:
     section = config.get("experiment") or {}
     if not isinstance(section, dict):
@@ -90,10 +112,22 @@ def stable_run_id(config: dict[str, Any], config_path: Path, backend: str) -> st
 
     job_id = os.environ.get("AIHC_JOB_ID") or os.environ.get("JOB_ID")
     if job_id:
-        return f"{experiment_name(config, config_path)}_{job_id}"
+        return (
+            f"{experiment_name(config, config_path)}_"
+            f"{safe_run_id_component(job_id)}"
+        )
 
-    # 单机交互调试可以接受 fallback；多机没有平台 job id 时必须显式给 BAIGE_RUN_ID，
-    # 否则不同节点可能生成不同 run_id，写到不同目录。
+    # 百舸默认 MASTER_ADDR={任务名称}-master-0，所有节点一致，因此它可以在平台
+    # 没有额外注入 job id 时充当共享 run id。若任务名称会重复，应显式设置
+    # BAIGE_RUN_ID，避免不同任务写到同一输出目录。
+    master_addr = os.environ.get("MASTER_ADDR", "").strip()
+    if master_addr:
+        return (
+            f"{experiment_name(config, config_path)}_"
+            f"{safe_run_id_component(master_addr)}"
+        )
+
+    # 本地单机调试可以接受 hostname fallback；多机仍要求一个跨节点共享标识。
     world_size = int_env("WORLD_SIZE", 1)
     if world_size > 1:
         raise SystemExit(
@@ -114,6 +148,27 @@ def baige_env(config: dict[str, Any], config_path: Path, backend: str) -> dict[s
     nproc_per_node = infer_nproc_per_node()
     master_addr = os.environ.get("MASTER_ADDR") or socket.gethostname()
     master_port = os.environ.get("MASTER_PORT") or "23456"
+    if nnodes <= 0:
+        raise SystemExit(f"ERROR: WORLD_SIZE must be positive, got {nnodes}")
+    if not 0 <= node_rank < nnodes:
+        raise SystemExit(
+            f"ERROR: RANK must satisfy 0 <= RANK < WORLD_SIZE, got "
+            f"RANK={node_rank}, WORLD_SIZE={nnodes}"
+        )
+    if nproc_per_node <= 0:
+        raise SystemExit(
+            f"ERROR: NPROC_PER_NODE must be positive, got {nproc_per_node}"
+        )
+    try:
+        parsed_master_port = int(master_port)
+    except ValueError as exc:
+        raise SystemExit(
+            f"ERROR: MASTER_PORT must be an integer, got {master_port!r}"
+        ) from exc
+    if not 1 <= parsed_master_port <= 65535:
+        raise SystemExit(
+            f"ERROR: MASTER_PORT must be between 1 and 65535, got {parsed_master_port}"
+        )
     run_id = stable_run_id(config, config_path, backend)
 
     env: dict[str, str] = {
@@ -192,7 +247,20 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--config", required=True, help="Path to experiment config.yaml")
     parser.add_argument("--dry-run", action="store_true", help="只打印解析结果和底层命令，不启动训练")
     parser.add_argument("--print-command", action="store_true", help="只打印底层命令，不执行")
+    parser.add_argument(
+        "--profile",
+        choices=sorted(FASTWAM_PROFILES),
+        help="FastWAM 运行档位；也可用 BAIGE_PROFILE=smoke|pilot|full。",
+    )
+    parser.add_argument(
+        "--require-platform-env",
+        action="store_true",
+        help="要求百舸注入的五个 PyTorchJob 环境变量全部存在。",
+    )
     args, passthrough = parser.parse_known_args(argv)
+
+    if args.require_platform_env:
+        require_pytorchjob_env()
 
     config_path = Path(args.config).resolve()
     project_root = find_project_root(config_path.parent)
@@ -202,6 +270,20 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit(f"ERROR: unsupported backend={backend!r}; expected one of {sorted(SUPPORTED_BACKENDS)}")
 
     env_updates = baige_env(config, config_path, backend)
+    requested_profile = (
+        args.profile
+        or os.environ.get("BAIGE_PROFILE", "").strip()
+        or os.environ.get("FASTWAM_MODE", "").strip()
+    )
+    if requested_profile:
+        if backend != "fastwam":
+            raise SystemExit("ERROR: --profile/BAIGE_PROFILE currently applies only to FastWAM")
+        if requested_profile not in FASTWAM_PROFILES:
+            raise SystemExit(
+                "ERROR: FastWAM profile must be smoke|pilot|full, got "
+                f"{requested_profile!r}"
+            )
+        env_updates["FASTWAM_MODE"] = requested_profile
     command = backend_command(project_root, config, config_path, backend, env_updates)
     if args.dry_run:
         command.append("--dry-run")

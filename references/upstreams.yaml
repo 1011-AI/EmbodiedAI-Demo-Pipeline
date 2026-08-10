@@ -1,5 +1,5 @@
 schema_version: "1.0"
-freeze_date: "2026-07-13"
+freeze_date: "2026-07-30"
 # 上游项目注册表：记录我们参考/集成的外部项目、固定 commit 和使用边界。
 # 这里不是依赖安装文件；真正拉源码由 scripts/*/prepare_* 或 Make target 完成。
 purpose: >
@@ -8,6 +8,71 @@ purpose: >
   vendored dependencies.
 
 sources:
+  # 2026 Challenge 的训练数据、闭环 evaluator 和提交协议主参考。
+  # 正式运行必须使用 v3.9.1；v3.9.0 的 R1Pro base_qvel 坐标系已过期。
+  behavior1k_2026:
+    role: primary_closed_loop_evaluation_target
+    repository: https://github.com/StanfordVL/BEHAVIOR-1K
+    documentation:
+      - https://behavior.stanford.edu/challenge/dataset.html
+      - https://behavior.stanford.edu/challenge/baselines.html
+      - https://behavior.stanford.edu/challenge/evaluation.html
+      - https://behavior.stanford.edu/challenge/submission.html
+    tag: v3.9.1
+    pinned_commit: 26f2c7ef7b9cf96bd0414f81e1e751e493762779
+    license: BSD-3-Clause
+    referenced_paths:
+      - OmniGibson/omnigibson/eval/evaluator.py
+      - OmniGibson/omnigibson/eval/utils/eval_utils.py
+      - OmniGibson/omnigibson/eval/utils/network_utils.py
+      - OmniGibson/omnigibson/eval/utils/score_utils.py
+    in_scope:
+      - r1pro_observation_and_action_contract
+      - websocket_policy_protocol
+      - public_test_rollouts
+      - challenge_metrics_and_videos
+    out_of_scope:
+      - vendoring_omnigibson
+      - changing_official_metric_semantics
+      - treating_offline_action_loss_as_closed_loop_success
+
+  # 1011-AI 的轻量工作区保存 baseline/evaluator 编排，但不承载训练代码。
+  behavior_baseline_workspace:
+    role: internal_behavior_evaluator_orchestrator
+    repository: https://github.com/1011-AI/Behavior
+    private: true
+    branch: agent/publish-behavior-baselines
+    pinned_commit: 6ba56ea4e29af8c2619c7e129864a6795145166d
+    license: internal_workspace_on_behavior_upstreams
+    in_scope:
+      - evaluator_setup_reference
+      - policy_server_and_evaluator_process_separation
+      - official_result_layout_reference
+    out_of_scope:
+      - model_training_implementation
+      - freezing_behavior1k_at_v3_9_0
+      - storing_model_weights_or_challenge_data
+
+  # 官方 π0.5 Behavior adapter 是 state/action 数值语义的 oracle。
+  # 本项目的主 π0.5 训练路线仍是 LeRobot/PyTorch，二者 checkpoint 不互通。
+  openpi_behavior_reference:
+    role: official_pi05_behavior_adapter_reference
+    repository: https://github.com/wensi-ai/openpi
+    branch: behavior
+    pinned_commit: 0cc8e355f7bac0976db1cc3139b1ff0379feea60
+    license: Apache-2.0
+    referenced_paths:
+      - src/openpi/configs/robots/b1k.py
+      - src/openpi/policies/b1k_policy.py
+      - src/openpi/training/config.py
+    in_scope:
+      - raw61_to_policy23_projection
+      - segmented_action_delta_reference
+      - pi05_behavior_protocol_oracle
+    out_of_scope:
+      - loading_jax_checkpoints_into_lerobot_pytorch
+      - becoming_a_third_primary_training_pipeline
+
   # 后续仿真/评测参考。当前不作为第一阶段训练链路依赖。
   robodojo:
     role: external_simulation_and_evaluation_target

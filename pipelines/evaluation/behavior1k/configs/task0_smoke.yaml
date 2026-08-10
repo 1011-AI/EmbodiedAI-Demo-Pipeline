@@ -1,0 +1,13 @@
+extends: base.yaml
+
+evaluation:
+  # 先验证 simulator -> WebSocket policy -> action -> JSON 的最短闭环。
+  instance_indices: [0]
+  num_rollouts: 1
+  max_steps: 10
+  write_video: false
+
+output:
+  directory: runs/experiments/evaluation/behavior1k/turning_on_radio_smoke
+  resume: true
+

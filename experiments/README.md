@@ -12,13 +12,37 @@
 
 > `make` 只做环境、下载、转换和检查；训练/推理从 `experiments/<route>/<experiment>/run.py` 或 `launch.sh` 启动。
 
-完整训练/推理说明见 [`../docs/TRAINING_AND_INFERENCE.md`](../docs/TRAINING_AND_INFERENCE.md)。
+当前 BEHAVIOR-1K 后训练主线见
+[`../docs/POST_TRAINING.md`](../docs/POST_TRAINING.md)。旧节点运行记录不能作为当前命令。
+
+## 当前主线：BEHAVIOR-1K Task 0
+
+| 路线 | 实验入口 | 当前状态 |
+|---|---|---|
+| LeRobot π0.5 | [`lerobot/pi05_behavior1k_task0/`](lerobot/pi05_behavior1k_task0/) | 真实 2-step、delta 重载、离线推理和 policy server 已验证 |
+| custom FastWAM | [`custom/fastwam_behavior1k_task0/`](custom/fastwam_behavior1k_task0/) | 真实 1-step、base→delta 重载、离线推理和 policy server 已验证 |
+
+最短入口：
+
+```bash
+python experiments/lerobot/pi05_behavior1k_task0/run.py \
+  --preflight --num-processes 1
+python experiments/lerobot/pi05_behavior1k_task0/run.py \
+  --num-processes 1
+
+python experiments/custom/fastwam_behavior1k_task0/run.py --dataset-smoke
+FASTWAM_GPUS_PER_NODE=1 \
+  python experiments/custom/fastwam_behavior1k_task0/run.py
+```
+
+这两个默认配置都是链路 smoke，不是收敛实验。
 
 ## 当前实验入口
 
 ```text
 experiments/
 ├── lerobot/
+│   ├── pi05_behavior1k_task0/          # 当前 π0.5 / BEHAVIOR Task0 主线
 │   ├── pusht_act_smoke/               # ACT / PushT training
 │   ├── pusht_diffusion_train/         # Diffusion / PushT training
 │   ├── smolvla_so100_8gpu_long/       # SmolVLA / SO100 8-GPU training
@@ -28,11 +52,15 @@ experiments/
 │   ├── pi05_so100_infer/              # pi05 / SO100 inference
 │   └── fastwam_libero_infer/          # FastWAM / LIBERO inference
 └── custom/
+    ├── fastwam_behavior1k_task0/       # 当前 FastWAM / BEHAVIOR Task0 主线
     ├── fastwam_realrobot_single8_random/
     │                                  # custom FastWAM single-node 8-GPU random-init training
     ├── fastwam_realrobot_8node_random/# custom FastWAM 8-node random-init training
     └── imagewam_flux2_4b_libero_pilot/# ImageWAM FLUX.2 4B LIBERO metadata/pilot
 ```
+
+带 `baige`、`cluster120` 或旧 `realrobot_*node*` 名称的目录只保留历史实验证据，不代表
+当前集群启动方式。新实验应从两个 BEHAVIOR 主线目录复制配置和入口。
 
 ## 资产准备
 
